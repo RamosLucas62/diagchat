@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { z } from 'zod';
 import {requestAuth,authorizeMagicSession,flowCookie,sessionCookie,authCookieOptions} from './auth.js';
+import {portalSlug,portalTemplate,nextPortalCampaignName} from './portal.js';
 import {ensureInvoiceReport} from './reports.js';
 import { resolve } from 'node:path';
 import { config,demo,production,assertConfigured } from './config.js';
@@ -83,7 +84,8 @@ app.get('/api/auth/callback',authLimit,async(req,res)=>{
 app.post('/api/logout',(req,res)=>{res.clearCookie(sessionCookie,authCookieOptions);res.clearCookie(flowCookie,authCookieOptions);res.json({ok:true});});
 async function auth(req:express.Request,res:express.Response,next:express.NextFunction){
  const portal=req.get('x-portal-token');
- if(portal){const [c]=await query('select id from app.clients where portal_hash=$1 and active',[hash(portal)]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
+ const slug=req.get('x-portal-slug');
+ if(portal||slug){if(!portal)return res.status(401).json({error:'Solicite seu link de acesso à equipe.'});const [c]=await query('select id from app.clients where portal_hash=$1 and active and ($2::text is null or portal_slug=$2)',[hash(portal),slug||null]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
  if(demo){res.locals.actor='demo';return next();}
  if(!req.cookies[sessionCookie])return res.status(401).json({error:'Entre com seu link de acesso para continuar.'});
  const {data,error}=await requestAuth(req,res).auth.getUser(req.cookies[sessionCookie]);
@@ -92,12 +94,12 @@ async function auth(req:express.Request,res:express.Response,next:express.NextFu
 }
 function admin(_req:express.Request,res:express.Response,next:express.NextFunction){if(res.locals.clientId)return res.status(403).json({error:'Acesso administrativo necessário.'});next();}
 app.use('/api',auth);
-const publicColumns='id,name,photo_url,plan_name,monthly_limit,overage_mode,overage_rate,active';
+const publicColumns='id,name,photo_url,plan_name,monthly_limit,overage_mode,overage_rate,active,portal_slug,allow_template_selection,default_template_name,default_template_language';
 const adminColumns=publicColumns+',email,waba_id,phone_id,group_id,throughput,monthly_fee,cost_rate,due_day,verify_token,created_at';
 async function clientRows(clientId?:string){return query(`select ${clientId?publicColumns:adminColumns},coalesce((select accepted from app.usage where client_id=c.id and period=app.current_period()),0) as used,coalesce((select reserved from app.usage where client_id=c.id and period=app.current_period()),0) as reserved,coalesce((select monthly_limit from app.usage where client_id=c.id and period=app.current_period()),monthly_limit) as current_limit from app.clients c ${clientId?'where id=$1':''} order by created_at desc`,clientId?[clientId]:[]);}
 app.get('/api/session',async(_req,res)=>{res.json({demo,portal:!!res.locals.clientId,clientId:res.locals.clientId||null});});
 app.get('/api/clients',async(_req,res)=>res.json(await clientRows(res.locals.clientId)));
-const clientSchema=z.object({name:z.string().trim().min(2).max(120),email:z.email(),photo_url:z.string().max(700000).default('').refine(safePhoto,'Foto inválida: use HTTPS, JPG, PNG ou WebP.'),waba_id:z.string().regex(/^\d+$/),phone_id:z.string().regex(/^\d+$/),token:z.string().max(5000).optional(),app_secret:z.string().max(200).optional(),group_id:z.string().max(150).default(''),throughput:z.coerce.number().int().min(1).max(1000),plan_name:z.string().min(1).max(100),monthly_limit:z.coerce.number().int().min(0).max(100000000),monthly_fee:z.coerce.number().min(0).max(10000000),overage_mode:z.enum(['block','charge']),overage_rate:z.coerce.number().min(0).max(1000),cost_rate:z.coerce.number().min(0).max(1000),due_day:z.coerce.number().int().min(1).max(28),active:z.boolean().default(true)});
+const clientSchema=z.object({name:z.string().trim().min(2).max(120),email:z.email(),photo_url:z.string().max(700000).default('').refine(safePhoto,'Foto inválida: use HTTPS, JPG, PNG ou WebP.'),waba_id:z.string().regex(/^\d+$/),phone_id:z.string().regex(/^\d+$/),token:z.string().max(5000).optional(),app_secret:z.string().max(200).optional(),group_id:z.string().max(150).default(''),throughput:z.coerce.number().int().min(1).max(1000),plan_name:z.string().min(1).max(100),monthly_limit:z.coerce.number().int().min(0).max(100000000),monthly_fee:z.coerce.number().min(0).max(10000000),overage_mode:z.enum(['block','charge']),overage_rate:z.coerce.number().min(0).max(1000),cost_rate:z.coerce.number().min(0).max(1000),due_day:z.coerce.number().int().min(1).max(28),active:z.boolean().default(true),allow_template_selection:z.boolean().default(false),default_template_name:z.string().regex(/^[a-z0-9_]*$/).max(512).default(''),default_template_language:z.string().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).default('pt_BR')});
 async function saveClient(req:express.Request,res:express.Response){
  const input=clientSchema.parse(req.body);const id=req.params.id?z.uuid().parse(req.params.id):null;
  if(!id&&!demo&&(!input.token||!input.app_secret))return res.status(400).json({error:'Token e App Secret são obrigatórios.'});
@@ -105,33 +107,38 @@ async function saveClient(req:express.Request,res:express.Response){
  const portal=opaqueToken();
  const row=await transaction(async db=>{
   if(id){const [existing]=(await db.query('select id from app.clients where id=$1 for update',[id])).rows;if(!existing)throw new Error('Cliente não encontrado.');await db.query('select app.ensure_usage($1)',[id]);}
-  const fields=['name','email','photo_url','waba_id','phone_id','group_id','throughput','plan_name','monthly_limit','monthly_fee','overage_mode','overage_rate','cost_rate','due_day','active'];
+  const fields=['name','email','photo_url','waba_id','phone_id','group_id','throughput','plan_name','monthly_limit','monthly_fee','overage_mode','overage_rate','cost_rate','due_day','active','allow_template_selection','default_template_name','default_template_language'];
   const values=fields.map(f=>(input as any)[f]);
   if(!id||input.token){fields.push('token_enc');values.push(demo?'demo':encrypt(input.token!));}
   if(!id||input.app_secret){fields.push('secret_enc');values.push(demo?'demo':encrypt(input.app_secret!));}
   let result;
-  if(id){values.push(id);result=await db.query(`update app.clients set ${fields.map((f,i)=>`${f}=$${i+1}`).join(',')} where id=$${values.length} returning id`,values);}
-  else{fields.push('verify_token','portal_hash');values.push(opaqueToken(),hash(portal));result=await db.query(`insert into app.clients(${fields.join(',')}) values(${values.map((_,i)=>`$${i+1}`).join(',')}) returning id`,values);await db.query('select app.ensure_usage($1)',[result.rows[0].id]);}
+  if(id){values.push(id);result=await db.query(`update app.clients set ${fields.map((f,i)=>`${f}=$${i+1}`).join(',')} where id=$${values.length} returning id,portal_slug`,values);await db.query('update app.usage set monthly_limit=$2 where client_id=$1 and period=app.current_period()',[id,input.monthly_limit]);}
+  else{let slug=portalSlug(input.name);const base=slug;let suffix=1;await db.query('select pg_advisory_xact_lock(827462)');while((await db.query('select 1 from app.clients where portal_slug=$1',[slug])).rows.length)slug=base+'_'+(++suffix);fields.push('verify_token','portal_hash','portal_slug');values.push(opaqueToken(),hash(portal),slug);result=await db.query(`insert into app.clients(${fields.join(',')}) values(${values.map((_,i)=>`$${i+1}`).join(',')}) returning id,portal_slug`,values);await db.query('select app.ensure_usage($1)',[result.rows[0].id]);}
   await db.query('insert into app.audit(actor,action,target_id) values($1,$2,$3)',[res.locals.actor,id?'client.update':'client.create',result.rows[0].id]);return result.rows[0];
- });res.json({...row,portalUrl:id?null:`${config.url}/p/#${portal}`});
+ });res.json({...row,portalUrl:id?null:`${config.url}/${row.portal_slug}#${portal}`});
 }
 app.post('/api/clients',admin,saveClient);app.put('/api/clients/:id',admin,saveClient);
-app.post('/api/clients/:id/portal',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);const token=opaqueToken();const rows=await query('update app.clients set portal_hash=$2 where id=$1 returning id',[id,hash(token)]);if(!rows.length)return res.sendStatus(404);await query('insert into app.audit(actor,action,target_id) values($1,\'portal.rotate\',$2)',[res.locals.actor,id]);res.json({url:`${config.url}/p/#${token}`});});
-app.get('/api/clients/:id/templates',async(req,res)=>{const id=z.uuid().parse(req.params.id);if(res.locals.clientId&&res.locals.clientId!==id)return res.sendStatus(403);const [c]=await query('select * from app.clients where id=$1 and active',[id]);if(!c)return res.sendStatus(404);res.json(await templates(c));});
+app.post('/api/clients/:id/portal',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);const token=opaqueToken();const rows=await query('update app.clients set portal_hash=$2 where id=$1 returning id,portal_slug',[id,hash(token)]);if(!rows.length)return res.sendStatus(404);await query('insert into app.audit(actor,action,target_id) values($1,\'portal.rotate\',$2)',[res.locals.actor,id]);res.json({url:`${config.url}/${rows[0].portal_slug}#${token}`});});
+app.get('/api/clients/:id/templates',async(req,res)=>{const id=z.uuid().parse(req.params.id);if(res.locals.clientId&&res.locals.clientId!==id)return res.sendStatus(403);const [c]=await query('select * from app.clients where id=$1 and active',[id]);if(!c)return res.sendStatus(404);const available=await templates(c);if(res.locals.clientId&&!c.allow_template_selection){const selected=portalTemplate(c,available);if(!selected)return res.status(400).json({error:'A equipe precisa configurar um template padrão aprovado para este cliente.'});return res.json([selected]);}res.json(available);});
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1,fields:1}});
 const importLimit=rateLimit({windowMs:60000,limit:8,message:{error:'Aguarde um minuto antes de importar novamente.'}});
 app.post('/api/import',importLimit,upload.single('file'),async(req,res)=>{if(!req.file||!req.file.originalname.toLowerCase().endsWith('.xlsx'))return res.status(400).json({error:'Selecione um arquivo .xlsx.'});const overrideSchema=z.record(z.string(),z.object({headerRow:z.number().int().min(1).max(50000).optional(),phoneColumn:z.string().max(200).optional()}));const overrides=overrideSchema.parse(JSON.parse(req.body.overrides||'{}'));res.json(await parseWorkbook(req.file.buffer,overrides));});
 const recipientSchema=z.object({phone:z.string().max(30),variables:z.array(z.string().min(1).max(1024)).max(30)});
-const campaignSchema=z.object({client_id:z.uuid(),name:z.string().trim().min(2).max(120),template_name:z.string().regex(/^[a-z0-9_]+$/),language:z.string().max(20),scheduled_at:z.iso.datetime(),consent_confirmed:z.literal(true),request_key:z.uuid(),recipients:z.array(recipientSchema).min(1).max(50000)});
+const campaignSchema=z.object({client_id:z.uuid(),name:z.string().trim().max(180).default(''),template_name:z.string().regex(/^[a-z0-9_]+$/),language:z.string().max(20),scheduled_at:z.iso.datetime(),consent_confirmed:z.literal(true),request_key:z.uuid(),recipients:z.array(recipientSchema).min(1).max(50000)});
 app.post('/api/campaigns',async(req,res)=>{
  const input=campaignSchema.parse(req.body);if(res.locals.clientId&&res.locals.clientId!==input.client_id)return res.sendStatus(403);
  const [c]=await query('select * from app.clients where id=$1 and active',[input.client_id]);if(!c)return res.status(400).json({error:'Cliente indisponível.'});
- const template=(await templates(c)).find(t=>t.name===input.template_name&&t.language===input.language&&t.supported);if(!template)return res.status(400).json({error:'Selecione um template aprovado e compatível.'});
+ const available=await templates(c);
+ if(res.locals.clientId&&!c.allow_template_selection){const fixed=portalTemplate(c,available);if(!fixed)return res.status(400).json({error:'A equipe precisa configurar um template padrão aprovado para este cliente.'});if(input.template_name!==fixed.name||input.language!==fixed.language)return res.status(400).json({error:'Utilize o template padrão configurado pela equipe.'});}
+ if(!res.locals.clientId&&input.name.length<2)return res.status(400).json({error:'Informe o nome da campanha.'});
+ const template=available.find(t=>t.name===input.template_name&&t.language===input.language&&t.supported);if(!template)return res.status(400).json({error:'Selecione um template aprovado e compatível.'});
  const seen=new Set();const recipients=input.recipients.map(r=>{const phone=normalizePhone(r.phone);if(!phone||r.variables.length!==template.parameters.length)throw new Error('Telefone ou variáveis inválidos. Revise a importação.');return {...r,phone};}).filter(r=>!seen.has(r.phone)&&seen.add(r.phone));
  const campaign=await transaction(async db=>{
+  const [locked]=(await db.query('select * from app.clients where id=$1 and active for update',[input.client_id])).rows;if(!locked)throw new Error('Cliente indisponível.');if(res.locals.clientId&&(locked.allow_template_selection!==c.allow_template_selection||locked.default_template_name!==c.default_template_name||locked.default_template_language!==c.default_template_language))throw new Error('A configuração mudou. Atualize o portal antes de solicitar novamente.');
   const [existing]=(await db.query('select id,client_id from app.campaigns where request_key=$1',[input.request_key])).rows;
   if(existing){if(existing.client_id!==input.client_id)throw new Error('Identificador de solicitação em uso.');return existing;}
-  const [p]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source) values($1,$2,$3,$4,$5,true,$6,$7,$8) returning id`,[input.client_id,input.name,input.template_name,input.language,input.scheduled_at,input.request_key,res.locals.clientId?'pending':'running',res.locals.clientId?'portal':'admin'])).rows;
+  const campaignName=res.locals.clientId?await nextPortalCampaignName(db,locked,input.scheduled_at):input.name;
+  const [p]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source) values($1,$2,$3,$4,$5,true,$6,$7,$8) returning id`,[input.client_id,campaignName,input.template_name,input.language,input.scheduled_at,input.request_key,res.locals.clientId?'pending':'running',res.locals.clientId?'portal':'admin'])).rows;
   await db.query(`insert into app.messages(campaign_id,client_id,phone,variables) select $1,$2,r.phone,r.variables from jsonb_to_recordset($3::jsonb) as r(phone text,variables jsonb)`,[p.id,input.client_id,JSON.stringify(recipients)]);
   await db.query(`insert into app.audit(actor,action,target_id) values($1,'campaign.create',$2)`,[res.locals.actor,p.id]);return p;
  });res.json(campaign);

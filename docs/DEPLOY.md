@@ -134,3 +134,11 @@ O `PAYMENT_INSTRUCTIONS` antigo é aceito somente como padrão de compatibilidad
 E-mails são materializados na fila com o conteúdo da cobrança. Alterar o modelo vale para novos e-mails, sem alterar uma tentativa já iniciada nem reenviar uma cobrança já enviada. Desativar o automático pausa as mensagens automáticas pendentes; não cancela uma ação de envio manual. Reativar libera mensagens automáticas pausadas que ainda não começaram. Faturas antigas que nunca foram enfileiradas continuam disponíveis para envio manual.
 
 Referência: [integração e permissões GitHub no EasyPanel](https://easypanel.io/docs/code-sources/github).
+
+## Portais e alterações de franquia
+
+O link gerado tem o formato `APP_URL/saude_e_vida#CHAVE`. Ao abrir, a chave é guardada apenas naquela aba e removida da barra, que passa a mostrar `APP_URL/saude_e_vida`. Compartilhe sempre o link completo gerado pelo painel. O nome sozinho não concede acesso aos dados. Links antigos `/p/#CHAVE` continuam válidos até a rotação. Slugs não mudam ao renomear o cliente; nomes repetidos recebem um sufixo.
+
+A migração 004 sincroniza a franquia configurada com o mês aberto. Novas edições de franquia são imediatas e preservam aceites/reservas e meses anteriores. Se a franquia for reduzida abaixo do consumo, o saldo será zero; a política cadastrada decide bloqueio ou cobrança de excedentes. Mensalidade e tarifa continuam congeladas no ciclo.
+
+Em **Editar cliente → Dados do cliente → Solicitações pelo portal**, ative ou desative a escolha de template e defina o padrão. Sem escolha, o servidor aceita somente o padrão; se não houver padrão explícito e existir exatamente um template compatível, ele será usado. Vários templates sem padrão exigem configuração administrativa. O portal recebe nome automático por cliente e data agendada no fuso de São Paulo, com sequência atômica e preservada em tentativas repetidas da mesma solicitação.

@@ -1,10 +1,13 @@
-export const portalMode=location.pathname.startsWith('/p/');
-// Fragment is never sent in HTTP requests or referrers. Keep the capability scoped to this tab.
-export const portalToken=portalMode?(location.hash.slice(1)||sessionStorage.getItem('diagchat_portal')||''):'';
-if(portalMode&&location.hash){sessionStorage.setItem('diagchat_portal',portalToken);history.replaceState(null,'',location.pathname);}
+const portalPath=location.pathname.replace(/\/+$/,'');
+export const portalMode=portalPath.startsWith('/p')||/^\/[a-z0-9_]+$/.test(portalPath);
+const portalSlug=portalPath.startsWith('/p/')||portalPath==='/p'?'':portalPath.slice(1);
+const storageKey='diagchat_portal:'+portalPath;
+// The secret stays in the fragment until first use, then in tab-scoped storage.
+export const portalToken=portalMode?(location.hash.slice(1)||sessionStorage.getItem(storageKey)||(portalSlug?'':sessionStorage.getItem('diagchat_portal'))||''):'';
+if(portalMode&&location.hash){sessionStorage.setItem(storageKey,portalToken);history.replaceState(null,'',location.pathname);}
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{
  const headers=new Headers(options.headers);if(!(options.body instanceof FormData))headers.set('Content-Type','application/json');
- if(portalMode)headers.set('X-Portal-Token',portalToken);
+ if(portalMode){headers.set('X-Portal-Token',portalToken);if(portalSlug)headers.set('X-Portal-Slug',portalSlug);}
  const response=await fetch('/api'+path,{...options,headers,credentials:'same-origin'});
  const data=await response.json().catch(()=>({error:'Resposta inválida do servidor.'}));if(!response.ok){const error=new Error(data.error||'Não foi possível concluir a operação.') as Error&{status:number};error.status=response.status;throw error;}return data;
 }
