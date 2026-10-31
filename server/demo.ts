@@ -9,6 +9,7 @@ export async function seedDemo() {
   await query('select app.ensure_usage($1)',[c.id]);await query('update app.usage set accepted=$2::integer,cost=$2::integer*0.025 where client_id=$1',[c.id,used]);
   const [p]=await query(`insert into app.campaigns(client_id,name,template_name,language,status,consent_confirmed,request_key,completed_at) values($1,$2,'novidades_do_mes','pt_BR','completed',true,gen_random_uuid(),now()-interval '2 hours') returning id`,[c.id,['Novidades de outubro','Agenda de atendimentos','Seleção especial','Novas turmas'][i]]);
   await query(`insert into app.messages(campaign_id,client_id,phone,state,delivery,accepted_at,period,cost_rate) select $1,$2,'55119'||lpad(g::text,6,'0'),'accepted',case when g%20=0 then 'failed' when g%5=0 then 'delivered' else 'read' end,now()-((g%least(extract(day from now() at time zone 'America/Sao_Paulo')::int,28))||' days')::interval,app.current_period(),0.025 from generate_series(1,$3::int) g`,[p.id,c.id,used]);
+  await query(`insert into app.usage(client_id,period,monthly_limit,monthly_fee,overage_rate,plan_name) select id,app.current_period()-interval '1 month',monthly_limit,monthly_fee,overage_rate,plan_name from app.clients where id=$1`,[c.id]);
   await query(`insert into app.invoices(client_id,period,base_amount,overage_count,overage_amount,total,due_date,status) values($1,app.current_period()-interval '1 month',$2,0,0,$2,app.current_period()+9,$3)`,[c.id,fee,i===2?'open':'paid']);
  }
 }

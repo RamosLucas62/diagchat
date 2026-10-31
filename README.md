@@ -28,6 +28,8 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 - Aceite conta uma vez; rejeição explícita antes do aceite libera reserva; timeout/HTTP 5xx vira envio incerto sem reenvio automático. Webhook pode reconciliar a resposta tardia.
 - Supressão de contatos que responderem SAIR, PARAR, STOP ou CANCELAR.
 - Financeiro com submenu expansível: dashboard e e-mails de cobrança. Modelo por cliente com assunto, corpo, instruções de pagamento, variáveis clicáveis e prévia. Envio automático opcional por cliente e envio manual por cobrança.
+- Login administrativo via magic link do Supabase, com PKCE, cookie cifrado e autorização pela lista de administradores.
+- Relatório PDF mensal anexo à cobrança: imagem das métricas, franquia, consumo e discriminação de mensalidade, excedentes e total. NF e boleto em espera.
 - Fechamento mensal automático e cobrança pelo Resend; outbox persistente e idempotência. Confirmação de pagamento manual, sem gateway de pagamento.
 - Resumo de conclusão pela Evolution v2 no grupo do cliente com aceitos, falhas de envio, cancelados, consumo e saldo. Entregas/leituras podem continuar chegando depois.
 

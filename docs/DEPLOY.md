@@ -26,6 +26,10 @@ insert into app.admins(user_id)
 values ('UUID_DO_USUARIO_SUPABASE_AUTH');
 ```
 
+O login usa **magic link**, sem senha. Em **Authentication → URL Configuration**, configure **Site URL** com a mesma `APP_URL` e autorize `APP_URL/api/auth/callback` em **Redirect URLs**, incluindo `APP_URL/api/auth/callback**` para o identificador de fluxo acrescentado pelo SDK. Substitua `APP_URL` pela URL HTTPS real. No modelo de e-mail Magic Link, preserve o link `{{ .ConfirmationURL }}` padrão do Supabase.
+
+Configure o envio de e-mails do Supabase Auth (SMTP de produção, que pode ser do Resend). As variáveis de cobrança `RESEND_API_KEY` e `RESEND_FROM` não configuram o SMTP do Supabase automaticamente. Solicite o link e abra-o no mesmo navegador em até 15 minutos. Um novo pedido substitui o fluxo anterior nesse navegador. O sistema não cria usuários ao solicitar o link.
+
 Somente usuários dessa lista entram no painel. Não há cadastro público nem permissão administrativa automática. A sessão expira de acordo com o access token do Supabase; entre novamente quando solicitado.
 
 ## 2. Ambiente
@@ -80,7 +84,9 @@ Templates precisam estar aprovados. A primeira versão aceita templates de texto
 
 ## 5. Resend e Evolution
 
-Verifique o domínio remetente no Resend e configure `RESEND_FROM`. Em **Financeiro → E-mails de cobrança**, selecione o cliente e configure assunto, mensagem, instruções de pagamento e envio automático. As variáveis são substituídas pelos dados da fatura. O worker gera uma cobrança única por cliente ao fechar a competência; só agenda o e-mail automaticamente se a opção estiver ativada. No modo manual, use **Enviar cobrança** no dashboard financeiro. A fatura é um registro de cobrança, não emissão fiscal ou boleto. Marque como paga após confirmar o recebimento.
+Verifique o domínio remetente no Resend e configure `RESEND_FROM`. Em **Financeiro → E-mails de cobrança**, selecione o cliente e configure assunto, mensagem, instruções de pagamento e envio automático. As variáveis são substituídas pelos dados da fatura. O worker gera uma cobrança única por cliente ao fechar a competência; só agenda o e-mail automaticamente se a opção estiver ativada. No modo manual, use **Enviar cobrança** no dashboard financeiro. Cada cobrança inclui **um PDF mensal anexado**, com imagem das métricas, mensagens aceitas, franquia, excedentes, tarifa, mensalidade e total. O relatório é preservado com os dados do fechamento em tabela privada; mudanças posteriores no cadastro não alteram esse documento. Também pode ser aberto em **Relatório PDF** no dashboard financeiro. Os status de entrega e leitura refletem o momento da geração.
+
+**NF e boleto ficam em espera**, sem emissão ou anexos fictícios. A integração futura será definida separadamente. Cobranças antigas sem registro de consumo precisam de revisão antes de gerar relatório. A fatura é um registro de cobrança, não emissão fiscal ou boleto. Marque como paga após confirmar o recebimento.
 
 Conecte a instância Evolution v2, inclua-a nos grupos e preencha o JID de cada grupo no cadastro do cliente, normalmente terminado em `@g.us`. O sistema usa `POST /message/sendText/{instance}` com cabeçalho `apikey`. Somente os avisos de conclusão usam essa integração; as campanhas usam a API oficial da Meta.
 

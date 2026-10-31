@@ -4,7 +4,8 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
+import {requestAuth,authorizeMagicSession,flowCookie,sessionCookie,authCookieOptions} from './auth.js';
+import {ensureInvoiceReport} from './reports.js';
 import { resolve } from 'node:path';
 import { config,demo,production,assertConfigured } from './config.js';
 import { query,transaction,prepareDatabase } from './db.js';
@@ -55,20 +56,37 @@ app.use('/api',(req,res,next)=>{
 const authLimit=rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:true,legacyHeaders:false,message:{error:'Muitas tentativas. Aguarde 15 minutos.'}});
 const apiLimit=rateLimit({windowMs:60*1000,limit:240,standardHeaders:true,legacyHeaders:false,message:{error:'Muitas solicitações. Aguarde um minuto.'}});
 app.use('/api',apiLimit);
-const supabase=!demo?createClient(config.supabase!,config.anon!,{auth:{persistSession:false,autoRefreshToken:false}}):null;
 app.post('/api/login',authLimit,async(req,res)=>{
- if(demo)return res.json({ok:true});
- const input=z.object({email:z.email(),password:z.string().min(1).max(200)}).parse(req.body);
- const {data,error}=await supabase!.auth.signInWithPassword(input);
- if(error||!data.user||!(await query('select 1 from app.admins where user_id=$1',[data.user.id])).length)return res.status(401).json({error:'E-mail ou senha inválidos, ou acesso não autorizado.'});
- res.cookie('diagchat_session',data.session.access_token,{httpOnly:true,secure:production,sameSite:'strict',maxAge:(data.session.expires_in||3600)*1000,path:'/'});res.json({ok:true});
+ const {email}=z.object({email:z.email()}).strict().parse(req.body);
+ if(demo)return res.json({ok:true,demo:true});
+ const client=requestAuth(req,res,true);
+ const {error}=await client.auth.signInWithOtp({email,options:{shouldCreateUser:false,emailRedirectTo:`${config.url}/api/auth/callback`}});
+ if(error?.status===429)return res.status(429).json({error:'Aguarde um minuto antes de solicitar outro link.'});
+ if(error&&(!error.status||error.status>=500))return res.status(503).json({error:'Não foi possível enviar o link agora. Tente novamente em instantes.'});
+ res.json({ok:true,message:'Se o e-mail estiver cadastrado, você receberá um link de acesso.'});
 });
-app.post('/api/logout',(req,res)=>{res.clearCookie('diagchat_session',{path:'/',secure:production,sameSite:'strict'});res.json({ok:true});});
+app.get('/api/auth/callback',authLimit,async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ if(demo)return res.redirect('/');
+ const code=z.string().min(6).max(4096).safeParse(req.query.code);
+ if(!code.success||!req.cookies[flowCookie])return res.redirect('/?login=invalid');
+ const flowId=z.string().min(1).max(128).optional().safeParse(req.query.sb_flow_id);
+ if(!flowId.success)return res.redirect('/?login=invalid');
+ const client=requestAuth(req,res);
+ const {data,error}=await client.auth.exchangeCodeForSession(code.data,flowId.data?{flowId:flowId.data}:undefined);
+ res.clearCookie(flowCookie,authCookieOptions);
+ if(error)return res.redirect('/?login=invalid');
+ const session=await authorizeMagicSession(data,async id=>(await query('select 1 from app.admins where user_id=$1',[id])).length>0);
+ if(!session)return res.redirect('/?login=unauthorized');
+ res.cookie(sessionCookie,session.token,{...authCookieOptions,maxAge:session.maxAge});return res.redirect('/');
+});
+app.post('/api/logout',(req,res)=>{res.clearCookie(sessionCookie,authCookieOptions);res.clearCookie(flowCookie,authCookieOptions);res.json({ok:true});});
 async function auth(req:express.Request,res:express.Response,next:express.NextFunction){
  const portal=req.get('x-portal-token');
  if(portal){const [c]=await query('select id from app.clients where portal_hash=$1 and active',[hash(portal)]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
  if(demo){res.locals.actor='demo';return next();}
- const {data,error}=await supabase!.auth.getUser(req.cookies.diagchat_session||'');
+ if(!req.cookies[sessionCookie])return res.status(401).json({error:'Entre com seu link de acesso para continuar.'});
+ const {data,error}=await requestAuth(req,res).auth.getUser(req.cookies[sessionCookie]);
  if(error||!data.user||!(await query('select 1 from app.admins where user_id=$1',[data.user.id])).length)return res.status(401).json({error:'Entre na sua conta para continuar.'});
  res.locals.actor=data.user.id;next();
 }
@@ -167,6 +185,11 @@ app.post('/api/finance/:id/email',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);const result=await transaction(async db=>{const item=await queueInvoiceEmail(db,id,false);if(!('error' in item))await db.query("insert into app.audit(actor,action,target_id) values($1,'billing.email.queue-manual',$2)",[res.locals.actor,id]);return item;});
  if('error' in result)return res.status(409).json(result);res.json(result);
 });
+app.get('/api/finance/:id/report',admin,async(req,res)=>{
+ const id=z.uuid().parse(req.params.id);const [invoice]=await query('select id from app.invoices where id=$1',[id]);if(!invoice)return res.status(404).json({error:'Cobrança não encontrada.'});
+ const report=await transaction(db=>ensureInvoiceReport(db,id));
+ res.type('application/pdf').set('Content-Disposition',`inline; filename="relatorio-mensal-${String(report.snapshot.period).slice(0,7)}.pdf"`).set('Cache-Control','no-store').send(Buffer.from(report.pdf_base64,'base64'));
+});
 app.get('/api/finance',admin,async(_req,res)=>res.json(await query(`select i.*,c.name as client_name,c.email,o.status as email_status,o.last_error,(o.first_attempt_at is null) as email_not_attempted from app.invoices i join app.clients c on c.id=i.client_id left join app.outbox o on o.kind='invoice' and o.reference_id=i.id order by i.period desc,c.name limit 250`)));
 app.post('/api/finance/:id/paid',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);await transaction(async db=>{await db.query(`update app.invoices set status='paid',paid_at=now() where id=$1`,[id]);await db.query(`insert into app.audit(actor,action,target_id) values($1,'invoice.paid',$2)`,[res.locals.actor,id]);});res.json({ok:true});});
 app.get('/api/settings',admin,async(_req,res)=>res.json({url:config.url,webhookPattern:`${config.url}/api/webhook/ID_DO_CLIENTE`,integrations:[{name:'Supabase',description:'Banco de dados e acesso administrativo',configured:!demo&&!!config.database},{name:'WhatsApp Cloud API',description:'Credenciais individuais no cadastro de cada cliente',configured:!demo&&!!config.graph},{name:'Resend',description:'E-mails automáticos de cobrança',configured:!demo&&!!(config.resend&&config.from)},{name:'Evolution',description:'Avisos de conclusão nos grupos dos clientes',configured:!demo&&!!(config.evolution&&config.evolutionKey&&config.evolutionInstance)}],notifications:await query('select id,kind,status,last_error,attempts from app.outbox where status<>\'sent\' order by next_attempt_at desc limit 30')}));
@@ -179,7 +202,7 @@ app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextF
  if(error?.code||error?.name==='SyntaxError')return res.status(400).json({error:'Não foi possível processar os dados. Verifique o formato e tente novamente.'});
  // Do not expose database statements, credentials, or stack traces.
  const message=error instanceof Error?error.message:'';
- if(/^(Selecione|Limite|Cada aba|Importe|Planilha|Arquivo|Cabeçalho|Telefone|Cliente|Identificador|A campanha|Não foi possível consultar)/.test(message))return res.status(400).json({error:message});
+ if(/^(Selecione|Limite|Cada aba|Importe|Planilha|Arquivo|Cabeçalho|Telefone|Cliente|Identificador|A campanha|A competência|Cobrança|Não foi possível consultar)/.test(message))return res.status(400).json({error:message});
  console.error('Falha de operação:',error?.name||'Error');res.status(500).json({error:'Não foi possível concluir a operação. Tente novamente.'});
 });
 app.listen(config.port,demo?'127.0.0.1':'0.0.0.0',()=>console.log(`DiagChat API: http://localhost:${config.port}${demo?' — demonstração local':''}`));

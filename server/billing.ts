@@ -1,5 +1,6 @@
 import {z} from 'zod';
 import type {DB} from './db.js';
+import {ensureInvoiceReport,reportAttachment} from './reports.js';
 import {defaultBillingSubject,defaultBillingBody,defaultPaymentInstructions,billingValues,renderBillingTemplate,validateBillingTemplate} from '../shared/billing.js';
 export const billingProfileSchema=z.object({auto_send:z.boolean(),subject_template:z.string().trim().min(1).max(200).refine(v=>!/[\r\n]/.test(v),'O assunto deve ter uma única linha.'),body_template:z.string().trim().min(1).max(12000),payment_instructions:z.string().max(4000),version:z.number().int().min(0)}).superRefine((v,ctx)=>{for(const key of ['subject_template','body_template'] as const){try{validateBillingTemplate(v[key]);}catch(e){ctx.addIssue({code:'custom',path:[key],message:(e as Error).message});}}});
 export async function ensureBillingProfile(db:DB,clientId:string){
@@ -22,7 +23,8 @@ export async function queueInvoiceEmail(db:DB,invoiceId:string,automatic:boolean
  const [client]=(await db.query('select name,email,plan_name from app.clients where id=$1',[invoice.client_id])).rows;
  const [usage]=(await db.query('select accepted,monthly_limit from app.usage where client_id=$1 and period=$2',[invoice.client_id,invoice.period])).rows;
  const variables=billingValues(client,{...usage,...invoice},profile.payment_instructions);
- const payload={to:[client.email],subject:renderBillingTemplate(profile.subject_template,variables).replace(/[\r\n]+/g,' '),text:renderBillingTemplate(profile.body_template,variables)};
+ const report=await ensureInvoiceReport(db,invoice.id);
+ const payload={attachments:[reportAttachment(report)],to:[client.email],subject:renderBillingTemplate(profile.subject_template,variables).replace(/[\r\n]+/g,' '),text:renderBillingTemplate(profile.body_template,variables)};
  const [item]=(await db.query("insert into app.outbox(kind,reference_id,payload,automatic) values('invoice',$1,$2,$3) returning id,status",[invoice.id,JSON.stringify(payload),automatic])).rows;
  return item;
 }

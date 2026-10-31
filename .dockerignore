@@ -6,3 +6,6 @@ build
 .env.*
 *.log
 docs/screenshots
+
+output
+tmp

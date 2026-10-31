@@ -14,6 +14,7 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/build ./build
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/supabase ./supabase
+COPY --from=build --chown=node:node /app/assets ./assets
 USER node
 EXPOSE 3000
 CMD ["node","build/server/index.js"]
