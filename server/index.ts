@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { z } from 'zod';
-import {requestAuth,authorizeMagicSession,flowCookie,sessionCookie,authCookieOptions} from './auth.js';
+import {requestAuth,authorizeMagicSession,createAdminSession,restoreAdminSession,sessionLifetime,flowCookie,sessionCookie,authCookieOptions} from './auth.js';
 import {portalSlug,portalTemplate,nextPortalCampaignName} from './portal.js';
 import {ensureInvoiceReport} from './reports.js';
 import { resolve } from 'node:path';
@@ -79,18 +79,18 @@ app.get('/api/auth/callback',authLimit,async(req,res)=>{
  if(error)return res.redirect('/?login=invalid');
  const session=await authorizeMagicSession(data,async id=>(await query('select 1 from app.admins where user_id=$1',[id])).length>0);
  if(!session)return res.redirect('/?login=unauthorized');
- res.cookie(sessionCookie,session.token,{...authCookieOptions,maxAge:session.maxAge});return res.redirect('/');
+ if(!data.session?.refresh_token)return res.redirect('/?login=invalid');const token=await transaction(db=>createAdminSession(db,data.user!.id,data.session!));res.cookie(sessionCookie,token,{...authCookieOptions,maxAge:sessionLifetime});return res.redirect('/');
 });
-app.post('/api/logout',(req,res)=>{res.clearCookie(sessionCookie,authCookieOptions);res.clearCookie(flowCookie,authCookieOptions);res.json({ok:true});});
+app.post('/api/logout',async(req,res)=>{if(!demo&&req.cookies[sessionCookie])await query('delete from app.admin_sessions where token_hash=$1',[hash(req.cookies[sessionCookie])]);res.clearCookie(sessionCookie,authCookieOptions);res.clearCookie(flowCookie,authCookieOptions);res.json({ok:true});});
 async function auth(req:express.Request,res:express.Response,next:express.NextFunction){
  const portal=req.get('x-portal-token');
  const slug=req.get('x-portal-slug');
  if(portal||slug){if(!portal)return res.status(401).json({error:'Solicite seu link de acesso à equipe.'});const [c]=await query('select id from app.clients where portal_hash=$1 and active and ($2::text is null or portal_slug=$2)',[hash(portal),slug||null]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
  if(demo){res.locals.actor='demo';return next();}
  if(!req.cookies[sessionCookie])return res.status(401).json({error:'Entre com seu link de acesso para continuar.'});
- const {data,error}=await requestAuth(req,res).auth.getUser(req.cookies[sessionCookie]);
- if(error||!data.user||!(await query('select 1 from app.admins where user_id=$1',[data.user.id])).length)return res.status(401).json({error:'Entre na sua conta para continuar.'});
- res.locals.actor=data.user.id;next();
+ const userId=await transaction(db=>restoreAdminSession(db,req.cookies[sessionCookie],requestAuth(req,res).auth));
+ if(!userId){res.clearCookie(sessionCookie,authCookieOptions);return res.status(401).json({error:'Entre com seu link de acesso para continuar.'});}
+ res.locals.actor=userId;next();
 }
 function admin(_req:express.Request,res:express.Response,next:express.NextFunction){if(res.locals.clientId)return res.status(403).json({error:'Acesso administrativo necessário.'});next();}
 app.use('/api',auth);
@@ -209,6 +209,7 @@ app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextF
  if(error?.code||error?.name==='SyntaxError')return res.status(400).json({error:'Não foi possível processar os dados. Verifique o formato e tente novamente.'});
  // Do not expose database statements, credentials, or stack traces.
  const message=error instanceof Error?error.message:'';
+ if(message==='Autenticação temporariamente indisponível.')return res.status(503).json({error:message});
  if(/^(Selecione|Limite|Cada aba|Importe|Planilha|Arquivo|Cabeçalho|Telefone|Cliente|Identificador|A campanha|A competência|Cobrança|Não foi possível consultar)/.test(message))return res.status(400).json({error:message});
  console.error('Falha de operação:',error?.name||'Error');res.status(500).json({error:'Não foi possível concluir a operação. Tente novamente.'});
 });

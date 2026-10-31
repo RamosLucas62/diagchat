@@ -17,7 +17,7 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 
 ## Implementado
 
-- Dashboard: clientes ativos, aceites no mês, média diária, faturamento previsto, custo e lucro estimados. Filtros por cliente e data (mês atual, 7/30/90 dias, último ano ou período personalizado de até 366 dias), entregas, leituras, falhas e exportação CSV. As métricas operacionais respeitam os dias selecionados; o financeiro considera as competências mensais incluídas.
+- Dashboard: clientes ativos, aceites no mês, média diária, faturamento previsto, custo e lucro estimados. Filtros por cliente e data (mês atual, 7/30/90 dias, último ano ou período personalizado de até 366 dias), aceites, falhas e exportação CSV. As métricas operacionais respeitam os dias selecionados; o financeiro considera as competências mensais incluídas.
 - Clientes em cards com busca e rolagem interna: nome, foto, e-mail financeiro, WABA ID, Phone Number ID, token, App Secret, grupo Evolution, throughput, plano, mensalidade, franquia, política de excedente, tarifa em reais, custo unitário e vencimento.
 - Webhook `APP_URL/api/webhook/:clientId`, com verificação GET e HMAC SHA-256 sobre o corpo bruto no POST; filtro de WABA e Phone ID; caixa de entrada durável e deduplicada.
 - Portal no endereço `APP_URL/nome_do_cliente`, com slug estável e único; o link compartilhado contém uma chave no fragmento, removida da barra após abrir. Solicitações recebem nome automático `Cliente | DD.MM.AA | NN` por data agendada de São Paulo; escolha de template opcional por cliente e padrão definido pela equipe. Portal com token aleatório de 256 bits no fragmento do link; só o hash fica no banco. Token enviado ao servidor por cabeçalho, sem exposição em logs de URL. Rotação revoga o link anterior. Portal sem credenciais Meta ou dados de outros clientes.
@@ -28,7 +28,7 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 - Aceite conta uma vez; rejeição explícita antes do aceite libera reserva; timeout/HTTP 5xx vira envio incerto sem reenvio automático. Webhook pode reconciliar a resposta tardia.
 - Supressão de contatos que responderem SAIR, PARAR, STOP ou CANCELAR.
 - Financeiro com submenu expansível: dashboard e e-mails de cobrança. Modelo por cliente com assunto, corpo, instruções de pagamento, variáveis clicáveis e prévia. Envio automático opcional por cliente e envio manual por cobrança.
-- Login administrativo via magic link do Supabase, com PKCE, cookie cifrado e autorização pela lista de administradores.
+- Login administrativo via magic link do Supabase, com PKCE, sessão de 30 dias em cookie HttpOnly, renovação automática e autorização pela lista de administradores. Tokens do provedor ficam criptografados no banco privado.
 - Relatório PDF mensal anexo à cobrança: imagem das métricas, franquia, consumo e discriminação de mensalidade, excedentes e total. NF e boleto em espera.
 - Fechamento mensal automático e cobrança pelo Resend; outbox persistente e idempotência. Confirmação de pagamento manual, sem gateway de pagamento.
 - Resumo de conclusão pela Evolution v2 no grupo do cliente com aceitos, falhas de envio, cancelados, consumo e saldo. Entregas/leituras podem continuar chegando depois.
