@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {createHmac} from 'node:crypto';
+import {encrypt,decrypt,verifySignature,hash,safePhoto} from '../server/security.js';
+test('criptografia autenticada não revela tokens e detecta adulteração',()=>{const key='ab'.repeat(32);const enc=encrypt('segredo-teste',key);assert(!enc.includes('segredo'));assert.equal(decrypt(enc,key),'segredo-teste');assert.throws(()=>decrypt(enc,'cd'.repeat(32)));assert.notEqual(encrypt('segredo-teste',key),enc);});
+test('webhook valida corpo bruto e segredo correto',()=>{const body=Buffer.from('{"ok":true}');const signature='sha256='+createHmac('sha256','test').update(body).digest('hex');assert(verifySignature(body,signature,'test'));assert(!verifySignature(Buffer.from('{"ok":false}'),signature,'test'));assert(!verifySignature(body,'','test'));assert(!verifySignature(body,signature,'other'));});
+test('portal usa hash e imagens rejeitam esquemas ativos',()=>{assert.equal(hash('token').length,64);assert(!safePhoto('javascript:alert(1)'));assert(!safePhoto('data:image/svg+xml,<svg/>'));assert(safePhoto('https://example.com/photo.jpg'));});
