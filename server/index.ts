@@ -7,12 +7,15 @@ import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { resolve } from 'node:path';
 import { config,demo,production,assertConfigured } from './config.js';
-import { query,transaction } from './db.js';
+import { query,transaction,prepareDatabase } from './db.js';
 import { encrypt,decrypt,opaqueToken,hash,equal,safePhoto,verifySignature } from './security.js';
 import { parseWorkbook,normalizePhone } from './importer.js';
 import { templates } from './meta.js';
+import {billingProfileSchema,ensureBillingProfile,queueInvoiceEmail} from './billing.js';
+import {billingValues} from '../shared/billing.js';
 import { analytics,parseAnalyticsFilter } from './analytics.js';
 assertConfigured();
+await prepareDatabase();
 if(demo){const {seedDemo}=await import('./demo.js');await seedDemo();}
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
 app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'data:','https:'],connectSrc:["'self'"],fontSrc:["'self'"],objectSrc:["'none'"],frameAncestors:["'none'"]}},referrerPolicy:{policy:'no-referrer'}}));
@@ -134,7 +137,37 @@ app.get('/api/metrics',async(req,res)=>{
  const result={...usage,...clients,...delivery,profit:usage.revenue-usage.cost,average:Math.round(usage.sent/day),daily};
  if(cid){delete result.revenue;delete result.cost;delete result.profit;}res.json(result);
 });
-app.get('/api/finance',admin,async(_req,res)=>res.json(await query(`select i.*,c.name as client_name,c.email,o.status as email_status,o.last_error from app.invoices i join app.clients c on c.id=i.client_id left join app.outbox o on o.kind='invoice' and o.reference_id=i.id order by i.period desc,c.name limit 250`)));
+app.get('/api/finance/email-settings',admin,async(_req,res)=>res.json(await query(`select c.id,c.name,c.email,c.photo_url,c.active,coalesce(s.auto_send,true) as auto_send,(s.client_id is not null and s.version>0) as customized,s.updated_at from app.clients c left join app.billing_email_settings s on s.client_id=c.id order by c.name`)));
+app.get('/api/finance/email-settings/:id',admin,async(req,res)=>{
+ const id=z.uuid().parse(req.params.id);
+ const result=await transaction(async db=>{
+  const [client]=(await db.query('select id,name,email,plan_name,monthly_limit,monthly_fee,overage_rate,due_day from app.clients where id=$1',[id])).rows;
+  if(!client)return null;
+  const profile=await ensureBillingProfile(db,id);
+  const [sample]=(await db.query(`select app.current_period() as period,coalesce(u.accepted,0) as accepted,coalesce(u.monthly_limit,c.monthly_limit) as monthly_limit,coalesce(u.monthly_fee,c.monthly_fee) as base_amount,greatest(0,coalesce(u.accepted,0)-coalesce(u.monthly_limit,c.monthly_limit)) as overage_count,round(greatest(0,coalesce(u.accepted,0)-coalesce(u.monthly_limit,c.monthly_limit))*coalesce(u.overage_rate,c.overage_rate),2) as overage_amount,(app.current_period()+interval '1 month')::date+c.due_day-1 as due_date from app.clients c left join app.usage u on u.client_id=c.id and u.period=app.current_period() where c.id=$1`,[id])).rows;
+  sample.total=Number(sample.base_amount)+Number(sample.overage_amount);
+  return {profile,client,variables:billingValues(client,sample,profile.payment_instructions)};
+ });
+ if(!result)return res.status(404).json({error:'Cliente não encontrado.'});res.json(result);
+});
+app.put('/api/finance/email-settings/:id',admin,async(req,res)=>{
+ const id=z.uuid().parse(req.params.id);const input=billingProfileSchema.parse(req.body);
+ const result=await transaction(async db=>{
+  const [client]=(await db.query('select id from app.clients where id=$1',[id])).rows;if(!client)return {notFound:true};
+  const existing=await ensureBillingProfile(db,id);if(existing.version!==input.version)return {conflict:true};
+  const [profile]=(await db.query('update app.billing_email_settings set auto_send=$2,subject_template=$3,body_template=$4,payment_instructions=$5,version=version+1,updated_at=now() where client_id=$1 returning *',[id,input.auto_send,input.subject_template,input.body_template,input.payment_instructions])).rows;
+  // Pause only automatic emails that have not started. Manual requests keep their explicit intent.
+  if(!input.auto_send)await db.query("update app.outbox o set status='held',last_error='Envio automático desativado para este cliente.' from app.invoices i where o.kind='invoice' and o.reference_id=i.id and i.client_id=$1 and o.automatic and o.status='pending'",[id]);
+  else await db.query("update app.outbox o set status='pending',next_attempt_at=now(),last_error=null from app.invoices i where o.kind='invoice' and o.reference_id=i.id and i.client_id=$1 and i.status='open' and o.automatic and o.status='held' and o.first_attempt_at is null",[id]);
+  await db.query("insert into app.audit(actor,action,target_id) values($1,'billing.email-settings.update',$2)",[res.locals.actor,id]);return {profile};
+ });
+ if('notFound' in result)return res.status(404).json({error:'Cliente não encontrado.'});if('conflict' in result)return res.status(409).json({error:'Este modelo foi alterado em outra sessão. Recarregue os dados antes de salvar.'});res.json(result.profile);
+});
+app.post('/api/finance/:id/email',admin,async(req,res)=>{
+ const id=z.uuid().parse(req.params.id);const result=await transaction(async db=>{const item=await queueInvoiceEmail(db,id,false);if(!('error' in item))await db.query("insert into app.audit(actor,action,target_id) values($1,'billing.email.queue-manual',$2)",[res.locals.actor,id]);return item;});
+ if('error' in result)return res.status(409).json(result);res.json(result);
+});
+app.get('/api/finance',admin,async(_req,res)=>res.json(await query(`select i.*,c.name as client_name,c.email,o.status as email_status,o.last_error,(o.first_attempt_at is null) as email_not_attempted from app.invoices i join app.clients c on c.id=i.client_id left join app.outbox o on o.kind='invoice' and o.reference_id=i.id order by i.period desc,c.name limit 250`)));
 app.post('/api/finance/:id/paid',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);await transaction(async db=>{await db.query(`update app.invoices set status='paid',paid_at=now() where id=$1`,[id]);await db.query(`insert into app.audit(actor,action,target_id) values($1,'invoice.paid',$2)`,[res.locals.actor,id]);});res.json({ok:true});});
 app.get('/api/settings',admin,async(_req,res)=>res.json({url:config.url,webhookPattern:`${config.url}/api/webhook/ID_DO_CLIENTE`,integrations:[{name:'Supabase',description:'Banco de dados e acesso administrativo',configured:!demo&&!!config.database},{name:'WhatsApp Cloud API',description:'Credenciais individuais no cadastro de cada cliente',configured:!demo&&!!config.graph},{name:'Resend',description:'E-mails automáticos de cobrança',configured:!demo&&!!(config.resend&&config.from)},{name:'Evolution',description:'Avisos de conclusão nos grupos dos clientes',configured:!demo&&!!(config.evolution&&config.evolutionKey&&config.evolutionInstance)}],notifications:await query('select id,kind,status,last_error,attempts from app.outbox where status<>\'sent\' order by next_attempt_at desc limit 30')}));
 app.use('/api',(_req,res)=>res.status(404).json({error:'Rota não encontrada.'}));

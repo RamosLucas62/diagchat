@@ -27,6 +27,7 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 - Fila PostgreSQL com reserva de cota atômica e espaçamento por cliente, inclusive com múltiplos workers. Throughput cadastrado é teto, não garantia de capacidade: o volume real depende de latência, concorrência, VPS e limites Meta.
 - Aceite conta uma vez; rejeição explícita antes do aceite libera reserva; timeout/HTTP 5xx vira envio incerto sem reenvio automático. Webhook pode reconciliar a resposta tardia.
 - Supressão de contatos que responderem SAIR, PARAR, STOP ou CANCELAR.
+- Financeiro com submenu expansível: dashboard e e-mails de cobrança. Modelo por cliente com assunto, corpo, instruções de pagamento, variáveis clicáveis e prévia. Envio automático opcional por cliente e envio manual por cobrança.
 - Fechamento mensal automático e cobrança pelo Resend; outbox persistente e idempotência. Confirmação de pagamento manual, sem gateway de pagamento.
 - Resumo de conclusão pela Evolution v2 no grupo do cliente com aceitos, falhas de envio, cancelados, consumo e saldo. Entregas/leituras podem continuar chegando depois.
 
@@ -39,6 +40,10 @@ Faturamento do dashboard é previsão de cobrança, não caixa recebido. Custo e
 Solicitações com limite atingido ficam bloqueadas na fila até renovar o mês ou mudar a política. Pausar/cancelar não interrompe uma requisição já enviada à Meta. Telefones duplicados são removidos dentro de cada campanha, mas podem participar de abas/dias diferentes.
 
 E-mails e avisos são processados pelo worker, independentemente de alguém estar com o painel aberto. O portal consulta os dados a cada 10 segundos e ao recuperar o foco. Links são capacidades de acesso: quem possui o link pode ver o portal e solicitar campanhas; a aprovação administrativa evita início automático pelo cliente.
+
+## Atualizações automáticas
+
+Os serviços web e worker aplicam as migrações pendentes ao iniciar, com bloqueio no PostgreSQL para impedir execução duplicada. Ative **Enable Auto Deploy** nos dois serviços EasyPanel, usando a origem GitHub `RamosLucas62/diagchat`, branch `main`. A integração GitHub precisa de acesso a conteúdo e metadados (leitura) e webhooks (leitura e escrita) para configurar o gatilho. Consulte [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Instalar em produção
 

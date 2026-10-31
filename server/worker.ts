@@ -1,7 +1,8 @@
 import { assertConfigured,demo } from './config.js';
-import { pool } from './db.js';
+import { pool,prepareDatabase } from './db.js';
 import { dispatchOne,maintenance,processOutbox } from './jobs.js';
 assertConfigured();if(demo)throw new Error('Worker desabilitado na demonstração.');
+await prepareDatabase();
 let stopping=false;process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 async function main(){

@@ -1,7 +1,7 @@
 import { config } from './config.js';
 import { query,transaction } from './db.js';
 import { sendMeta } from './meta.js';
-const money=(n:number)=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(n);
+import {queueInvoiceEmail} from './billing.js';
 export async function dispatchOne() {
  const [{job}]=await query('select app.claim_message() as job');if(!job)return false;
  let result;try{result=await sendMeta(job);}catch{result={state:'unknown',id:null,error:'Resposta incerta. Aguardando webhook; não reenviar automaticamente.'};}
@@ -21,9 +21,7 @@ export async function maintenance() {
   const invoices=(await db.query(`insert into app.invoices(client_id,period,base_amount,overage_count,overage_amount,total,due_date)
    select u.client_id,u.period,u.monthly_fee,greatest(0,u.accepted-u.monthly_limit),round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),u.monthly_fee+round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),(u.period+interval '1 month')::date+c.due_day-1
    from app.usage u join app.clients c on c.id=u.client_id where u.period<app.current_period() and u.reserved=0 on conflict do nothing returning *`)).rows;
-  for(const invoice of invoices){const [c]=(await db.query('select name,email from app.clients where id=$1',[invoice.client_id])).rows;
-   const period=new Date(invoice.period).toLocaleDateString('pt-BR',{month:'long',year:'numeric',timeZone:'UTC'});
-   await db.query(`insert into app.outbox(kind,reference_id,payload) values('invoice',$1,$2) on conflict do nothing`,[invoice.id,JSON.stringify({from:config.from,to:[c.email],subject:`Sua mensalidade DiagChat — ${period}`,text:`Olá, ${c.name}.\n\nSua cobrança de ${period}:\nPlano: ${money(Number(invoice.base_amount))}\nExcedentes (${invoice.overage_count}): ${money(Number(invoice.overage_amount))}\nTotal: ${money(Number(invoice.total))}\nVencimento: ${new Date(invoice.due_date).toLocaleDateString('pt-BR',{timeZone:'UTC'})}\n\n${process.env.PAYMENT_INSTRUCTIONS||'Entre em contato com nosso financeiro para os dados de pagamento.'}\n\nReferência: ${invoice.id}`})]);}
+  for(const invoice of invoices)await queueInvoiceEmail(db,invoice.id,true);
  });
  // Inbox reconciliation also handles webhook arriving before the HTTP response is persisted.
  const events=await query('select * from app.webhook_events where processed_at is null order by created_at limit 100');
@@ -38,6 +36,13 @@ export async function maintenance() {
 }
 export async function processOutbox() {
  const [item]=await query(`update app.outbox set status='sending',locked_at=now(),attempts=attempts+1 where id=(select id from app.outbox where status='pending' and next_attempt_at<=now() order by next_attempt_at for update skip locked limit 1) returning *`);if(!item)return;
+ if(item.kind==='invoice'){
+  const [state]=await query(`select i.status,coalesce(s.auto_send,true) as auto_send from app.invoices i left join app.billing_email_settings s on s.client_id=i.client_id where i.id=$1`,[item.reference_id]);
+  // Some legacy/manual outbox records may no longer have an invoice: hold rather than send orphaned bills.
+  if(!state||state.status==='paid'||(item.automatic&&!state.auto_send)){
+   await query("update app.outbox set status='held',last_error=$2 where id=$1",[item.id,!state?'Cobrança não encontrada.':state.status==='paid'?'Cobrança já paga.':'Envio automático desativado para este cliente.']);return;
+  }
+ }
  const ready=item.kind==='invoice'?config.resend&&config.from:config.evolution&&config.evolutionKey&&config.evolutionInstance;
  if(!ready){await query(`update app.outbox set status='pending',next_attempt_at=now()+interval '5 minutes',last_error='Configuração da integração pendente' where id=$1`,[item.id]);return;}
  if(item.kind==='invoice'&&item.first_attempt_at&&Date.now()-new Date(item.first_attempt_at).getTime()>23*3600000){await query(`update app.outbox set status='review',last_error='Janela de idempotência encerrada; confira o Resend antes de reenviar.' where id=$1`,[item.id]);return;}

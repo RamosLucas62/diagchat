@@ -18,7 +18,22 @@ try{
  const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
  const analytics=(await call(`/analytics?start=${today}&end=${today}`,'GET',undefined,token)).data;assert.equal(analytics.clients,1);assert(!('revenue' in analytics));assert.equal((await call(`/analytics?start=${today}&end=${today}&client_id=${before[0].id}`,'GET',undefined,token)).status,403);
  const metric=(await call('/metrics','GET',undefined,token)).data;assert(!('revenue' in metric));assert(!('cost' in metric));assert.equal(metric.clients,1);
+ const emailConfig=await call(`/finance/email-settings/${cid}`);assert.equal(emailConfig.status,200);assert.equal(emailConfig.data.profile.auto_send,true);
+ const updatedEmail={...emailConfig.data.profile,auto_send:false,subject_template:'Fatura {{cliente_nome}}',body_template:'Total {{total}}. {{instrucoes_pagamento}}',payment_instructions:'PIX de teste'};
+ assert.equal((await call(`/finance/email-settings/${cid}`,'PUT',updatedEmail,token)).status,403);
+ const savedEmail=await call(`/finance/email-settings/${cid}`,'PUT',updatedEmail);assert.equal(savedEmail.status,200);assert.equal(savedEmail.data.auto_send,false);assert.equal(savedEmail.data.version,1);
+ assert.equal((await call(`/finance/email-settings/${cid}`,'PUT',updatedEmail)).status,409);
+ assert.equal((await call(`/finance/email-settings/${cid}`,'PUT',{...updatedEmail,version:1,body_template:'{{segredo}}'})).status,400);
+ assert.equal((await call('/finance/email-settings','GET',undefined,token)).status,403);
+ const persistedEmail=await call(`/finance/email-settings/${cid}`);assert.equal(persistedEmail.data.profile.payment_instructions,'PIX de teste');
+ const openInvoice=(await call('/finance')).data.find((i:any)=>i.status==='open');assert(openInvoice);
+ assert.equal((await call(`/finance/${openInvoice.id}/email`,'POST',undefined,token)).status,403);
+ const queuedEmail=await call(`/finance/${openInvoice.id}/email`,'POST');assert.equal(queuedEmail.status,200);const repeatedEmail=await call(`/finance/${openInvoice.id}/email`,'POST');assert.equal(queuedEmail.data.id,repeatedEmail.data.id);
+ const invoiceAfter=(await call('/finance')).data.find((i:any)=>i.id===openInvoice.id);assert.equal(invoiceAfter.email_status,'pending');
+ const openProfile=(await call(`/finance/email-settings/${openInvoice.client_id}`)).data.profile;await call(`/finance/email-settings/${openInvoice.client_id}`,'PUT',{...openProfile,auto_send:false});
+ // An explicit manual request is not cancelled by the automatic-mail preference.
+ assert.equal((await call('/finance')).data.find((i:any)=>i.id===openInvoice.id).email_status,'pending');
  const rotated=await call(`/clients/${cid}/portal`,'POST');assert.equal(rotated.status,200);assert.equal((await call('/clients','GET',undefined,token)).status,401);
  const wrongOrigin=await fetch(base+'/api/logout',{method:'POST',headers:{Origin:'https://untrusted.example'}});assert.equal(wrongOrigin.status,403);
- console.log('Integração HTTP: cadastro, portal isolado, importação, campanha, idempotência, aprovação, rotação de link e origem validados.');
+ console.log('Integração HTTP: cadastro, portal isolado, importação, campanha, idempotência, aprovação, rotação de link, modelos financeiros por cliente, controle de versão, envio manual e origem validados.');
 }finally{child.kill('SIGTERM');}
