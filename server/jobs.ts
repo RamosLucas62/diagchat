@@ -10,6 +10,7 @@ export async function dispatchOne() {
  await query('select app.finish_message($1,$2,$3,$4)',[job.message.id,result.state,result.id,result.error]);return true;
 }
 export async function maintenance() {
+ await query('delete from app.import_batches where expires_at<now()');
  await query(`update app.messages set state='unknown',error='Processo interrompido; aguardando confirmação da Meta.' where state='sending' and claimed_at<now()-interval '2 minutes'`);
  await transaction(async db=>{
   // Serialized monthly closing and completion: two workers cannot queue the same notice.

@@ -144,3 +144,9 @@ O link gerado tem o formato `APP_URL/saude_e_vida#CHAVE`. Ao abrir, a chave é g
 A migração 004 sincroniza a franquia configurada com o mês aberto. Novas edições de franquia são imediatas e preservam aceites/reservas e meses anteriores. Se a franquia for reduzida abaixo do consumo, o saldo será zero; a política cadastrada decide bloqueio ou cobrança de excedentes. Mensalidade e tarifa continuam congeladas no ciclo.
 
 Em **Editar cliente → Dados do cliente → Solicitações pelo portal**, ative ou desative a escolha de template e defina o padrão. Sem escolha, o servidor aceita somente o padrão; se não houver padrão explícito e existir exatamente um template compatível, ele será usado. Vários templates sem padrão exigem configuração administrativa. O portal recebe nome automático por cliente e data agendada no fuso de São Paulo, com sequência atômica e preservada em tentativas repetidas da mesma solicitação.
+
+## Importação automática por cliente
+
+A migração 006 adiciona os perfis, arquivos temporários privados e referências de origem. Ela é aplicada automaticamente ao iniciar web/worker. Atualize ambos para a mesma versão; não há novas variáveis de ambiente.
+
+Antes de liberar o envio de planilhas, configure **Clientes → Editar → Planilhas e disparos** com os templates e o significado das variáveis do cliente. O perfil inicial não inventa essas associações. A revisão fica em **Disparos → Importações e pendências**. Todos os novos lotes aguardam aprovação antes de entrar na fila do worker. Consulte [IMPORTACAO.md](IMPORTACAO.md) para formatos, agendamentos e revisão.

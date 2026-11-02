@@ -1,4 +1,6 @@
 import express from 'express';
+import {templateSignature} from './import-plan.js';
+import {importRouter} from './import-routes.js';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
@@ -94,6 +96,7 @@ async function auth(req:express.Request,res:express.Response,next:express.NextFu
 }
 function admin(_req:express.Request,res:express.Response,next:express.NextFunction){if(res.locals.clientId)return res.status(403).json({error:'Acesso administrativo necessário.'});next();}
 app.use('/api',auth);
+app.use('/api',importRouter);
 const publicColumns='id,name,photo_url,plan_name,monthly_limit,overage_mode,overage_rate,active,portal_slug,allow_template_selection,default_template_name,default_template_language';
 const adminColumns=publicColumns+',email,waba_id,phone_id,group_id,throughput,monthly_fee,cost_rate,due_day,verify_token,created_at';
 async function clientRows(clientId?:string){return query(`select ${clientId?publicColumns:adminColumns},coalesce((select accepted from app.usage where client_id=c.id and period=app.current_period()),0) as used,coalesce((select reserved from app.usage where client_id=c.id and period=app.current_period()),0) as reserved,coalesce((select monthly_limit from app.usage where client_id=c.id and period=app.current_period()),monthly_limit) as current_limit from app.clients c ${clientId?'where id=$1':''} order by created_at desc`,clientId?[clientId]:[]);}
@@ -126,6 +129,7 @@ app.post('/api/import',importLimit,upload.single('file'),async(req,res)=>{if(!re
 const recipientSchema=z.object({phone:z.string().max(30),variables:z.array(z.string().min(1).max(1024)).max(30)});
 const campaignSchema=z.object({client_id:z.uuid(),name:z.string().trim().max(180).default(''),template_name:z.string().regex(/^[a-z0-9_]+$/),language:z.string().max(20),scheduled_at:z.iso.datetime(),consent_confirmed:z.literal(true),request_key:z.uuid(),recipients:z.array(recipientSchema).min(1).max(50000)});
 app.post('/api/campaigns',async(req,res)=>{
+ if(res.locals.clientId)return res.status(403).json({error:'Solicite os disparos pela importação de planilha.'});
  const input=campaignSchema.parse(req.body);if(res.locals.clientId&&res.locals.clientId!==input.client_id)return res.sendStatus(403);
  const [c]=await query('select * from app.clients where id=$1 and active',[input.client_id]);if(!c)return res.status(400).json({error:'Cliente indisponível.'});
  const available=await templates(c);
@@ -147,7 +151,7 @@ app.get('/api/campaigns',async(_req,res)=>res.json(await query(`select p.*,c.nam
 app.post('/api/campaigns/:id/action',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);const {action}=z.object({action:z.enum(['approve','pause','resume','cancel'])}).parse(req.body);
  const [p]=await query('select * from app.campaigns where id=$1',[id]);if(!p)return res.sendStatus(404);
- if(['approve','resume'].includes(action)){const [c]=await query('select * from app.clients where id=$1',[p.client_id]);if(!c.active)return res.status(400).json({error:'Ative o cliente antes de iniciar.'});if(!(await templates(c)).some(t=>t.name===p.template_name&&t.language===p.language&&t.supported))return res.status(400).json({error:'Template indisponível na Meta.'});}
+ if(['approve','resume'].includes(action)){const [c]=await query('select * from app.clients where id=$1',[p.client_id]);if(!c.active)return res.status(400).json({error:'Ative o cliente antes de iniciar.'});const currentTemplate=(await templates(c)).find(t=>t.name===p.template_name&&t.language===p.language&&t.supported);if(!currentTemplate)return res.status(400).json({error:'Template indisponível na Meta.'});if(p.import_template_signature&&p.import_template_signature!==templateSignature(currentTemplate))return res.status(400).json({error:'O template mudou desde a importação. Reimporte a planilha com o perfil atualizado antes de enviar.'});}
  const allowed:Record<string,string[]>={approve:['pending'],pause:['running','blocked'],resume:['paused','blocked'],cancel:['pending','running','paused','blocked']};
  await transaction(async db=>{const rows=(await db.query(`update app.campaigns set status=$2 where id=$1 and status=any($3) returning id`,[id,{approve:'running',pause:'paused',resume:'running',cancel:'cancelled'}[action],allowed[action]])).rows;if(!rows.length)throw new Error('A campanha mudou de estado. Atualize a página.');if(action==='cancel')await db.query(`update app.messages set state='cancelled' where campaign_id=$1 and state='queued'`,[id]);await db.query('insert into app.audit(actor,action,target_id) values($1,$2,$3)',[res.locals.actor,`campaign.${action}`,id]);});res.json({ok:true});
 });
