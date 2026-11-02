@@ -3,7 +3,7 @@ import {AlertCircle,Check,RefreshCw} from 'lucide-react';
 import {api} from './api';
 import {Empty,Field,ScrollArea} from './components';
 type Event={id:string;occurred_at:string;source:string;operation:string;code:string;message:string;details:string;client_name?:string;campaign_name?:string;request_id:string;resolved_at:string|null};
-const sources:Record<string,string>={web:'Aplicação web',worker:'Fila de disparos',meta:'Meta',resend:'E-mails · Resend',evolution:'Grupos · Evolution',import:'Planilhas',browser:'Interface'};
+const sources:Record<string,string>={web:'Aplicação web',worker:'Fila de disparos',asaas:'Financeiro · Asaas',meta:'Meta',resend:'E-mails · Resend',evolution:'Grupos · Evolution',import:'Planilhas',browser:'Interface'};
 export function ErrorLogs(){
  const [items,setItems]=useState<Event[]>([]),[source,setSource]=useState(''),[resolved,setResolved]=useState('open'),[error,setError]=useState(''),[busy,setBusy]=useState(false),[resolving,setResolving]=useState('');
  const generation=useRef(0);

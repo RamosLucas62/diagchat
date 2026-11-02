@@ -4,7 +4,7 @@ import {query} from './db.js';
 export function safeErrorText(value:unknown):string{
  let text=value instanceof Error?value.message:String(value??'');
  // Never store request bodies, spreadsheets or provider payloads. Redact credentials even in provider messages.
- for(const [key,secret] of Object.entries(process.env))if(secret&&secret.length>=6&&/(TOKEN|SECRET|PASSWORD|DATABASE_URL|RESEND_API_KEY|EVOLUTION_API_KEY|ENCRYPTION_KEY)/i.test(key))text=text.split(secret).join('[oculto]');
+ for(const [key,secret] of Object.entries(process.env))if(secret&&secret.length>=6&&/(TOKEN|SECRET|PASSWORD|DATABASE_URL|ASAAS_API_KEY|RESEND_API_KEY|EVOLUTION_API_KEY|ENCRYPTION_KEY)/i.test(key))text=text.split(secret).join('[oculto]');
  return text.replace(/Bearer\s+\S+/gi,'Bearer [oculto]').replace(/(postgres(?:ql)?:\/\/)[^\s]+/gi,'$1[oculto]').replace(/((?:token|apikey|api_key|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi,'$1[oculto]').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[e-mail oculto]').replace(/\b\d{10,16}\b/g,'[número oculto]').slice(0,4000);
 }
 export type ErrorEvent={source:string;operation:string;code?:string;error:unknown;details?:string;clientId?:string;campaignId?:string;requestId?:string};

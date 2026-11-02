@@ -1,3 +1,4 @@
+import {ensureAsaasBilling} from './asaas.js';
 import {z} from 'zod';
 import type {DB} from './db.js';
 import {ensureInvoiceReport,reportAttachment} from './reports.js';
@@ -9,8 +10,9 @@ export async function ensureBillingProfile(db:DB,clientId:string){
 }
 export async function queueInvoiceEmail(db:DB,invoiceId:string,automatic:boolean){
  const [invoice]=(await db.query('select * from app.invoices where id=$1 for update',[invoiceId])).rows;
- if(!invoice)return {error:'Cobrança não encontrada.'};if(invoice.status==='paid')return {error:'Esta cobrança já foi paga.'};
+ if(!invoice)return {error:'Cobrança não encontrada.'};if(invoice.status!=='open')return {error:'Esta cobrança não está aberta para envio.'};
  const profile=await ensureBillingProfile(db,invoice.client_id);if(automatic&&!profile.auto_send)return {skipped:true};
+ await ensureAsaasBilling(db,invoice);
  const [existing]=(await db.query("select * from app.outbox where kind='invoice' and reference_id=$1 for update",[invoice.id])).rows;
  if(existing){
   if(existing.status==='held'&&!existing.first_attempt_at){

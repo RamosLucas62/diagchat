@@ -92,3 +92,40 @@ Reimplante **web e worker** no EasyPanel para aplicar esta versão. A migração
 A versão com múltiplos links usa a migração automática `008_multiple_portal_links.sql`. Reimplante o **web** no EasyPanel; não há novas variáveis. O link ativo anterior é preservado. Links que já foram substituídos e invalidados em versões antigas não podem ser recuperados porque suas chaves não eram armazenadas; gere novos links para essas pessoas.
 
 Os relatórios de conclusão no grupo são consolidados por solicitação de disparo, somando todos os lotes e templates, após o último lote terminar. A migração automática `009_campaign_report_groups.sql` mantém o vínculo mesmo após expirar o arquivo enviado. Reimplante **web e worker** juntos para que novas solicitações recebam o vínculo e o worker emita somente o relatório consolidado. Sem novas variáveis de ambiente.
+
+## Asaas — boleto, NFS-e e conciliação
+
+A migração `010_asaas.sql` é automática. Reimplante **web e worker** com as mesmas variáveis:
+
+- `ASAAS_ENVIRONMENT=sandbox` para homologação ou `production` para cobranças reais.
+- `ASAAS_API_KEY`: chave da conta no respectivo ambiente, somente no servidor.
+- `ASAAS_WEBHOOK_TOKEN`: token independente da chave, com 32–255 caracteres, igual ao token cadastrado manualmente no webhook Asaas.
+- `ASAAS_DOCUMENT_HOSTS`: opcional, lista de domínios HTTPS exatos adicionais caso os PDFs retornados pela API utilizem hospedagem fora de `*.asaas.com`. Downloads têm limite de 8 MB por documento e não enviam a chave da API.
+
+Cadastre o pagador **manualmente no Asaas**, com dados fiscais e endereço completos. Copie o ID `cus_…` para **Clientes → Plano & cobrança → ID do pagador no Asaas**. A aplicação não cadastra pagadores e não provisiona chaves nem configurações de webhook na conta Asaas.
+
+Configure sua empresa para emissão de NFS-e no Asaas. Em **Financeiro → Asaas → Configurar emissão automática**, salve o código/nome do serviço, descrição, observações e impostos e ative a integração. O Portal Nacional utiliza `municipalServiceCode`. As alíquotas iniciais zeradas são campos a conferir, não uma determinação tributária. Esses dados são enviados em cada NFS-e e ficam congelados na fatura. Desativar a criação impede novos POSTs; consultas e conciliação de registros existentes continuam funcionando. Revise no Asaas as notificações próprias de cobrança/NF para evitar e-mails duplicados, já que o DiagChat envia os documentos pelo Resend.
+
+Cadastre manualmente no Asaas o webhook **POST `https://SEU_DOMINIO/api/webhooks/asaas`**, API v3, com o mesmo `ASAAS_WEBHOOK_TOKEN`. Eventos recomendados:
+
+- `PAYMENT_CREATED`, `PAYMENT_UPDATED`, `PAYMENT_CONFIRMED`, `PAYMENT_RECEIVED`, `PAYMENT_DUNNING_RECEIVED`, `PAYMENT_OVERDUE`, `PAYMENT_DELETED`, `PAYMENT_RESTORED`;
+- `PAYMENT_REFUNDED`, `PAYMENT_PARTIALLY_REFUNDED`, `PAYMENT_REFUND_IN_PROGRESS`, `PAYMENT_RECEIVED_IN_CASH_UNDONE`, `PAYMENT_CHARGEBACK_REQUESTED`, `PAYMENT_CHARGEBACK_DISPUTE`, `PAYMENT_AWAITING_CHARGEBACK_REVERSAL`;
+- `INVOICE_CREATED`, `INVOICE_UPDATED`, `INVOICE_AUTHORIZED`, `INVOICE_ERROR`, `INVOICE_CANCELED`, `INVOICE_PROCESSING_CANCELLATION`, `INVOICE_CANCELLATION_DENIED`.
+
+O receptor valida `asaas-access-token`, grava apenas identificadores antes de responder HTTP 200 e ignora eventos repetidos pelo ID. O worker consulta o recurso na API autenticada para obter valores, status e URLs confiáveis; o corpo do webhook não dá baixa diretamente. Eventos fora de ordem não fazem o pagamento regredir, porque a consulta usa o estado atual. Há reconciliação diária de documentos prontos e consulta a cada 30 minutos enquanto aguarda autorização, para recuperar notificações perdidas.
+
+No fechamento pós-pago, uma cobrança Asaas é criada com `POST /v3/payments` (`BOLETO`) e referência `diagchat/ID_DA_FATURA`. Uma NFS-e é criada com `POST /v3/invoices`, vinculada pelo campo `payment`, com o principal original e `updatePayment:false`. O worker aguarda `AUTHORIZED`, baixa boleto e nota e o Resend envia **três PDFs**: relatório mensal, boleto e NFS-e. Se o cliente pagar antes da autorização da nota, o e-mail ainda envia os documentos e informa que não deve pagar novamente. O XML fica referenciado no registro privado da integração.
+
+Juros contratuais são enviados na base mensal proporcional a 30 dias: uma taxa diária é multiplicada por 30. O Asaas limita os juros a 10% ao mês; taxas acima disso ficam em revisão, sem alteração silenciosa. O painel mantém a estimativa contratual, enquanto a baixa registra o valor efetivamente retornado pelo Asaas. O provedor também aplica suas regras de vencimento em dias não úteis. Não somamos os juros novamente ao principal enviado ao Asaas.
+
+`PAYMENT_CONFIRMED` registra pagamento confirmado; `PAYMENT_RECEIVED` registra também a disponibilidade na conta. São preservados bruto pago, líquido após tarifas, data de pagamento do cliente e estornos. Estorno total, parcial e disputa têm estados próprios e não disparam nova cobrança automaticamente. Faturas gerenciadas pelo Asaas não podem ser marcadas como pagas pelo botão manual.
+
+Erros ficam em **Histórico de erros → Financeiro · Asaas** e na própria fatura. **Sincronizar Asaas** consulta os registros pela referência antes de criar. Em timeout ou execução interrompida, nunca repete cegamente um POST: se a criação anterior não puder ser localizada, mantém revisão para conferência no Asaas. Notas já criadas em `ERROR` precisam ser corrigidas no Asaas antes da sincronização; editar o padrão fiscal não altera notas já emitidas. Cobranças antigas já enviadas não são recriadas automaticamente.
+
+Rotas administrativas:
+
+- `GET/PUT /api/finance/asaas-settings` — padrão fiscal, ativação e indicadores de configuração, sem devolver segredos;
+- `POST /api/finance/:id/asaas-sync` — reconciliar a fatura;
+- `GET /api/finance/:id/asaas-documents/boleto` e `/nf` — PDFs privados, somente para administradores.
+
+As rotas financeiras não são acessíveis pelos links do portal do cliente. Testes locais simulam o Asaas e o Resend; valide a configuração fiscal e os documentos no Sandbox antes de ativar cobranças reais.
