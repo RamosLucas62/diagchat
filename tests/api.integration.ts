@@ -40,7 +40,15 @@ try{
  const events=(await call('/error-logs?source=browser&status=open')).data;const browserLog=events.find((e:any)=>e.message==='Falha de teste sem dados pessoais');assert(browserLog);assert(browserLog.occurred_at);assert.equal(browserLog.client_id,cid);assert.equal((await call(`/error-logs/${browserLog.id}/resolve`,'POST',{},token)).status,403);assert.equal((await call(`/error-logs/${browserLog.id}/resolve`,'POST')).status,200);assert((await call('/error-logs?source=browser&status=resolved')).data.some((e:any)=>e.id===browserLog.id));
  // Payment confirmation is idempotent and freezes the amount and timestamp.
  assert.equal((await call(`/finance/${openInvoice.id}/paid`,'POST')).status,200);const paid=(await call('/finance')).data.find((i:any)=>i.id===openInvoice.id);assert.equal(paid.status,'paid');assert.equal(Number(paid.paid_total),Number(paid.amount_due));assert.equal((await call(`/finance/${openInvoice.id}/paid`,'POST')).status,200);const paidAgain=(await call('/finance')).data.find((i:any)=>i.id===openInvoice.id);assert.equal(paidAgain.paid_at,paid.paid_at);assert.equal(paidAgain.amount_due,paid.amount_due);
- const rotated=await call(`/clients/${cid}/portal`,'POST');assert.equal(rotated.status,200);assert.equal((await call('/clients','GET',undefined,token)).status,401);
+ const links=await Promise.all(Array.from({length:3},()=>call(`/clients/${cid}/portal`,'POST')));assert(links.every(r=>r.status===200));
+ const tokens=[token,...links.map(r=>new URL(r.data.url).hash.slice(1))];assert.equal(new Set(tokens).size,4);
+ for(const linkToken of tokens){const own=await call('/clients','GET',undefined,linkToken);assert.equal(own.status,200);assert.equal(own.data.length,1);assert.equal(own.data[0].id,cid);assert.equal((await call('/finance','GET',undefined,linkToken)).status,403);}
+ assert.equal((await call(`/clients/${cid}/portal`,'POST',{},tokens[1])).status,403);
+ assert.equal((await fetch(base+'/api/session',{headers:{'X-Portal-Token':tokens[1],'X-Portal-Slug':'outro_cliente'}})).status,401);
+ assert.equal((await call('/clients/'+cid,'PUT',{...edited,active:false})).status,200);
+ for(const linkToken of tokens)assert.equal((await call('/session','GET',undefined,linkToken)).status,401);
+ assert.equal((await call('/clients/'+cid,'PUT',{...edited,active:true})).status,200);
+ for(const linkToken of tokens)assert.equal((await call('/session','GET',undefined,linkToken)).status,200);
  const wrongOrigin=await fetch(base+'/api/logout',{method:'POST',headers:{Origin:'https://untrusted.example'}});assert.equal(wrongOrigin.status,403);
- console.log('Integração HTTP com histórico de erros privado e pagamento idempotente: cadastro, portal isolado, importação, campanha, idempotência, aprovação, rotação de link, modelos financeiros por cliente, controle de versão, envio manual e origem validados.');
+ console.log('Integração HTTP com histórico de erros privado e pagamento idempotente: cadastro, portal isolado, importação, campanha, idempotência, aprovação, vários links simultâneos sem invalidar os anteriores, modelos financeiros por cliente, controle de versão, envio manual e origem validados.');
 }finally{child.kill('SIGTERM');}

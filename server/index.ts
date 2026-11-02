@@ -89,7 +89,7 @@ app.post('/api/logout',async(req,res)=>{if(!demo&&req.cookies[sessionCookie])awa
 async function auth(req:express.Request,res:express.Response,next:express.NextFunction){
  const portal=req.get('x-portal-token');
  const slug=req.get('x-portal-slug');
- if(portal||slug){if(!portal)return res.status(401).json({error:'Solicite seu link de acesso à equipe.'});const [c]=await query('select id from app.clients where portal_hash=$1 and active and ($2::text is null or portal_slug=$2)',[hash(portal),slug||null]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
+ if(portal||slug){if(!portal)return res.status(401).json({error:'Solicite seu link de acesso à equipe.'});const [c]=await query('select c.id from app.clients c where (c.portal_hash=$1 or exists(select 1 from app.portal_links l where l.client_id=c.id and l.token_hash=$1)) and c.active and ($2::text is null or c.portal_slug=$2)',[hash(portal),slug||null]);if(!c)return res.status(401).json({error:'Link inválido ou desativado.'});res.locals.clientId=c.id;res.locals.actor=`portal:${c.id}`;return next();}
  if(demo){res.locals.actor='demo';return next();}
  if(!req.cookies[sessionCookie])return res.status(401).json({error:'Entre com seu link de acesso para continuar.'});
  const userId=await transaction(db=>restoreAdminSession(db,req.cookies[sessionCookie],requestAuth(req,res).auth));
@@ -129,7 +129,11 @@ async function saveClient(req:express.Request,res:express.Response){
  });res.json({...row,portalUrl:id?null:`${config.url}/${row.portal_slug}#${portal}`});
 }
 app.post('/api/clients',admin,saveClient);app.put('/api/clients/:id',admin,saveClient);
-app.post('/api/clients/:id/portal',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);const token=opaqueToken();const rows=await query('update app.clients set portal_hash=$2 where id=$1 returning id,portal_slug',[id,hash(token)]);if(!rows.length)return res.sendStatus(404);await query('insert into app.audit(actor,action,target_id) values($1,\'portal.rotate\',$2)',[res.locals.actor,id]);res.json({url:`${config.url}/${rows[0].portal_slug}#${token}`});});
+app.post('/api/clients/:id/portal',admin,async(req,res)=>{
+ const id=z.uuid().parse(req.params.id),token=opaqueToken();
+ const client=await transaction(async db=>{const [c]=(await db.query('select id,portal_slug from app.clients where id=$1',[id])).rows;if(!c)return null;await db.query('insert into app.portal_links(token_hash,client_id) values($1,$2)',[hash(token),id]);await db.query("insert into app.audit(actor,action,target_id) values($1,'portal.create-link',$2)",[res.locals.actor,id]);return c;});
+ if(!client)return res.sendStatus(404);res.json({url:`${config.url}/${client.portal_slug}#${token}`});
+});
 app.get('/api/clients/:id/templates',async(req,res)=>{const id=z.uuid().parse(req.params.id);if(res.locals.clientId&&res.locals.clientId!==id)return res.sendStatus(403);const [c]=await query('select * from app.clients where id=$1 and active',[id]);if(!c)return res.sendStatus(404);const available=await templates(c);if(res.locals.clientId&&!c.allow_template_selection){const selected=portalTemplate(c,available);if(!selected)return res.status(400).json({error:'A equipe precisa configurar um template padrão aprovado para este cliente.'});return res.json([selected]);}res.json(available);});
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1,fields:1}});
 const importLimit=rateLimit({windowMs:60000,limit:8,message:{error:'Aguarde um minuto antes de importar novamente.'}});
