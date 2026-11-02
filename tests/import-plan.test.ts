@@ -65,3 +65,26 @@ test('não inventa a origem de variáveis sem contexto nem escolhe entre duas da
  const unknown=await buildImportPlan(bytes,p,[t],{now});assert.equal(unknown.summary.messages,0);assert(unknown.issues.some(i=>i.message.includes('interpretar a variável {{2}}')));
  t={...t,body:'Olá {{1}}. Data: {{2}}'};const ambiguous=await buildImportPlan(bytes,p,[t],{now});assert.equal(ambiguous.summary.messages,0);assert(ambiguous.issues.some(i=>i.message.includes('Mais de uma coluna')));
 });
+
+test('exportação clínica usa a unidade em PRESTADOR como Local e o cabeçalho composto como Exames',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');
+ const t={name:'confirmacao_exames',language:'pt_BR',supported:true,body:'Olá, {{1}}.\n\nSegue a confirmação do agendamento dos seus exames para o Laboratório Exemplo.\n\n🗓️ Data: {{2}}\n📍 Local: {{3}}\n🔬 Exames: {{4}}\n\nDocumentação necessária: apresente os documentos.',parameters:['1','2','3','4']};
+ const p=defaultImportProfile();p.fixedTemplate='confirmacao_exames:pt_BR';p.templates=[automaticTemplate(t)];
+ const rows=[['Ana Silva','111.222.333-44','11999991234',new Date('2026-11-03T00:00:00Z'),'LAB - Unidade RUA 9-A - Setor Exemplo','EXAMES DE PATOLOGIA CLÍNICA - LABORATÓRIO'],['Bruno Costa','222.333.444-55','11988881234','03/11/2026','LAB - Unidade RUA 7-A Edifício Exemplo','Hemograma'],['Carla Lima','333.444.555-66','11977771234','03/11/2026','LAB - Unidade Central - Em frente ao estádio','Glicemia']];
+ const bytes=await workbook([{name:'Página1',headerRow:1,headers:['NOME','CPF','CONTATO','DATA DO AGENDAMENTO','PRESTADOR','Procedimento N° DO PEDIDO'],rows}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.summary.messages,3);assert.equal(plan.sheets[0].phoneColumn,'CONTATO');assert.equal(plan.sheets[0].headerRow,1);assert.deepEqual(plan.segments[0].recipients[0].variables,['Ana Silva','03/11/2026',rows[0][4],rows[0][5]]);
+});
+test('Local não é preenchido com o nome de um médico nem escolhe entre dois prestadores com endereços',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'local',language:'pt_BR',supported:true,body:'Olá {{1}}.\nLocal: {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='local:pt_BR';p.templates=[automaticTemplate(t)];
+ const doctor=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador'],rows:[['Ana','11999991234','Dra. Clara Silva']]}]);const missing=await buildImportPlan(doctor,p,[t],{now});assert.equal(missing.summary.messages,0);assert(missing.issues[0].message.includes('Coluna de local não identificada'));
+ const ambiguous=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador','Prestador responsável'],rows:[['Ana','11999991234','Unidade Rua A','Unidade Rua B']]}]);const both=await buildImportPlan(ambiguous,p,[t],{now});assert.equal(both.summary.messages,0);assert(both.issues[0].message.includes('Mais de uma coluna'));
+});
+test('Local explícito tem prioridade e pedidos numéricos no cabeçalho composto não viram exames',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'local',language:'pt_BR',supported:true,body:'Olá {{1}}.\nLocal: {{2}}\nExames: {{3}}',parameters:['1','2','3']};const p=defaultImportProfile();p.fixedTemplate='local:pt_BR';p.templates=[automaticTemplate(t)];
+ const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador','Local','Procedimento N° DO PEDIDO','N° do pedido'],rows:[['Ana','11999991234','Unidade Rua A','Unidade Rua B','Hemograma','188074']]}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.segments[0].recipients[0].variables[1],'Unidade Rua B');assert.equal(plan.segments[0].recipients[0].variables[2],'Hemograma');
+ const numeric=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador','Procedimento N° DO PEDIDO'],rows:[['Ana','11999991234','Unidade Rua A','188074']]}]);const invalid=await buildImportPlan(numeric,p,[t],{now});assert.equal(invalid.summary.messages,0);assert(invalid.issues[0].message.includes('não identifica o procedimento'));
+});
+
+test('uma coluna majoritariamente de unidades não libera a linha que contém somente um médico',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'local',language:'pt_BR',supported:true,body:'Olá {{1}}.\nLocal: {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='local:pt_BR';p.templates=[automaticTemplate(t)];
+ const rows=Array.from({length:10},(_,i)=>['Pessoa '+i,'11999991234',i===9?'Dra. Clara Silva':'LAB - Unidade Rua A']);const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador'],rows}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.equal(plan.issues.length,1);assert.equal(plan.issues[0].row,18);assert(plan.issues[0].message.includes('não identifica uma unidade ou endereço'));
+});

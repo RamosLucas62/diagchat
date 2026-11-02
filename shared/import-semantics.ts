@@ -12,7 +12,10 @@ const vocabulary={
 export type Semantic=keyof typeof vocabulary;
 export const semanticLabels:Record<Semantic,string>={name:'Nome da pessoa',date:'Data do atendimento',time:'Horário',procedure:'Procedimento',location:'Local',provider:'Prestador',instructions:'Orientações'};
 export function columnSemantic(header:string):Semantic|null{
- const s=words(header);if(/\b(cpf|email|telefone|celular|phone|whatsapp|pedido|protocolo|codigo|valor|nascimento|birth|emissao|cadastro)\b/.test(s))return null;
+ const s=words(header);
+ // Some exports combine the procedure label with an order-number label in one heading.
+ if(/^procedimentos?\s+(?:n|no|numero)\s+(?:do\s+)?pedido$/.test(s))return 'procedure';
+ if(/\b(cpf|email|telefone|celular|phone|whatsapp|pedido|protocolo|codigo|valor|nascimento|birth|emissao|cadastro)\b/.test(s))return null;
  // A provider's name and a unit's name must not be confused with the recipient.
  for(const key of ['time','date','provider','location','procedure','instructions','name'] as Semantic[])if(vocabulary[key].test(s))return key;
  return null;

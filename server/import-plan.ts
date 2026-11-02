@@ -1,4 +1,4 @@
-import {columnSemantic,templateSemantic,semanticLabels} from '../shared/import-semantics.js';
+import {columnSemantic,templateSemantic,semanticLabels,words} from '../shared/import-semantics.js';
 import {createHash} from 'node:crypto';
 import {parseWorkbook,normalize,type SheetPreview} from './importer.js';
 import type {ImportProfile,ImportIssue,ImportBinding} from '../shared/import-profile.js';
@@ -28,17 +28,30 @@ function transform(value:string,b:ImportBinding){
  if(b.transform==='time'){const match=v.match(/(?:^|T|\s)([01]?\d|2[0-3]):([0-5]\d)(?::\d{2})?(?:Z)?$/);if(!match)throw new Error(`Horário inválido para ${b.label||b.parameter}.`);return match[1].padStart(2,'0')+':'+match[2];}
  return v;
 }
-function automaticColumn(sheet:SheetPreview,body:string,b:ImportBinding):{name:string;binding:ImportBinding}{
+function locationValue(value:string):boolean{
+ const s=words(value);
+ if(/^(?:dr|dra|doutor|doutora|medico|medica)\b/.test(s))return false;
+ return /\b(rua|avenida|av|travessa|alameda|rodovia|estrada|praca|logradouro|endereco|unidade|clinica|hospital|laboratorio|street|avenue)\s+\S+/.test(s);
+}
+const combinedProcedureHeader=(header:string)=>/^procedimentos?\s+(?:n|no|numero)\s+(?:do\s+)?pedido$/.test(words(header));
+const procedureText=(value:string)=>/[a-zA-ZÀ-ÿ]{4}/.test(value)&&!/^\s*(?:pedido|protocolo|codigo)\s*[:#-]?\s*\d+\s*$/i.test(value);
+function automaticColumn(sheet:SheetPreview,body:string,b:ImportBinding):{name:string;binding:ImportBinding;locationFromContent:boolean;combinedProcedure:boolean}{
  const semantic=templateSemantic(body,b.parameter,b.label);
  if(!semantic)throw new Error(`Não foi possível interpretar a variável {{${b.parameter}}} pelo texto do template. A equipe precisa definir seu significado.`);
- const candidates=sheet.columns.filter(c=>columnSemantic(c)===semantic);
+ let candidates=sheet.columns.filter(c=>columnSemantic(c)===semantic);let locationFromContent=false;
+ // Provider columns may contain a physical unit/address rather than a person's name.
+ // Only fall back when no location-labelled column exists and content provides strong evidence.
+ if(!candidates.length&&semantic==='location'){
+  candidates=sheet.columns.filter(c=>{if(columnSemantic(c)!=='provider')return false;const values=sheet.rows.slice(0,100).map(r=>r.fields[c]?.trim()).filter(Boolean);return values.length>0&&values.filter(locationValue).length/values.length>=0.9;});
+  locationFromContent=candidates.length>0;
+ }
  if(!candidates.length)throw new Error(`Coluna de ${semanticLabels[semantic].toLowerCase()} não identificada para {{${b.parameter}}}.`);
  // Validate the column across multiple rows, never choose a different column for each recipient.
  const quality=(c:string)=>{const values=sheet.rows.slice(0,100).map(r=>r.fields[c]?.trim()).filter(Boolean);return values.length?values.filter(v=>semantic==='date'?!!calendarDate(v):semantic==='time'?/(?:^|T|\s)([01]?\d|2[0-3]):[0-5]\d/.test(v):/[a-zA-ZÀ-ÿ]/.test(v)).length/values.length:0;};
  const ranked=candidates.map(name=>({name,quality:quality(name)})).sort((a,b)=>b.quality-a.quality);
  if(ranked.length>1&&ranked[0].quality-ranked[1].quality<0.5)throw new Error(`Mais de uma coluna de ${semanticLabels[semantic].toLowerCase()} corresponde à variável {{${b.parameter}}}. A equipe precisa revisar.`);
  const format=b.transform==='text'?(semantic==='date'?'date':semantic==='time'?'time':'text'):b.transform;
- return {name:ranked[0].name,binding:{...b,label:b.label||semanticLabels[semantic],transform:format}};
+ return {name:ranked[0].name,binding:{...b,label:b.label||semanticLabels[semantic],transform:format},locationFromContent,combinedProcedure:semantic==='procedure'&&combinedProcedureHeader(ranked[0].name)};
 }
 export async function buildImportPlan(buffer:Buffer,profile:ImportProfile,templates:Template[],options:{chosenTemplate?:string;overrides?:ImportOverride;ignoredRows?:{sheet:string;row:number}[];now?:Date}={}):Promise<ImportPlan>{
  const now=options.now||new Date();const ignored=new Set((options.ignoredRows||[]).map(r=>JSON.stringify([r.sheet,r.row])));
@@ -59,7 +72,7 @@ export async function buildImportPlan(buffer:Buffer,profile:ImportProfile,templa
     const allowed=profile.templates.find(t=>t.key===key);if(!allowed)throw new Error(profile.mode==='form'?'Selecione um template liberado pela equipe.':'Template sem configuração de variáveis no perfil.');
     const template=templates.find(t=>`${t.name}:${t.language}`===key&&t.supported);if(!template)throw new Error('Template não está aprovado ou compatível na Meta.');if(allowed.signature&&allowed.signature!==templateSignature(template))throw new Error('O template mudou na Meta. A equipe precisa conferir e salvar o perfil novamente.');
     let bindings=template.parameters.map(parameter=>{const b=allowed.bindings.find(b=>b.parameter===parameter);if(!b)throw new Error(`Configure a origem da variável {{${parameter}}} no perfil.`);return b;});
-    const variables=bindings.map((b,i)=>{if(b.source==='auto'||(b.source==='column'&&!b.aliases.length)){const cacheKey=JSON.stringify([key,b.parameter]);let resolved=resolvedColumns.get(cacheKey);if(!resolved){resolved=automaticColumn(sheet,template.body,b);resolvedColumns.set(cacheKey,resolved);}bindings[i]=resolved.binding;return transform(row.fields[resolved.name]||'',resolved.binding);}return transform(b.source==='fixed'?b.value:row.fields[column(sheet.columns,b.aliases)]||'',b);});
+    const variables=bindings.map((b,i)=>{if(b.source==='auto'||(b.source==='column'&&!b.aliases.length)){const cacheKey=JSON.stringify([key,b.parameter]);let resolved=resolvedColumns.get(cacheKey);if(!resolved){resolved=automaticColumn(sheet,template.body,b);resolvedColumns.set(cacheKey,resolved);}const value=row.fields[resolved.name]||'';if(resolved.locationFromContent&&!locationValue(value))throw new Error(`O conteúdo de ${resolved.name} não identifica uma unidade ou endereço para {{${b.parameter}}}.`);if(resolved.combinedProcedure&&!procedureText(value))throw new Error(`O conteúdo de ${resolved.name} não identifica o procedimento para {{${b.parameter}}}.`);bindings[i]=resolved.binding;return transform(value,resolved.binding);}return transform(b.source==='fixed'?b.value:row.fields[column(sheet.columns,b.aliases)]||'',b);});
     if(variables.some(v=>v.length>1024))throw new Error('Uma variável ultrapassa 1.024 caracteres.');
     let immediate=profile.schedule.source==='immediate';let scheduledAt=now.toISOString();
     if(!immediate){const date=profile.schedule.source==='sheet'?sheetDate(sheet.name,profile.schedule.year):calendarDate(row.fields[column(sheet.columns,profile.schedule.aliases)]||'',profile.schedule.year);if(!date)throw new Error('Data de agendamento ausente, inválida ou ambígua. Configure o ano quando a aba não o informar.');const source=new Date(date+'T12:00:00Z');source.setUTCDate(source.getUTCDate()-profile.schedule.daysBefore);const day=source.toISOString().slice(0,10);scheduledAt=schedules.get(day)||saoPauloInstant(day,profile.schedule.time);schedules.set(day,scheduledAt);if(Date.parse(scheduledAt)<now.getTime()){if(profile.schedule.past==='now'){scheduledAt=now.toISOString();immediate=true;}else throw new Error('A data calculada para o disparo já passou. A equipe precisa revisar o agendamento.');}}
