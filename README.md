@@ -90,3 +90,5 @@ O consumo de cada competência é fechado e cobrado no mês seguinte, no dia de 
 Reimplante **web e worker** no EasyPanel para aplicar esta versão. A migração `007_operations_and_interest.sql` é automática na inicialização, sem novas variáveis de ambiente. O worker continua necessário para disparos e fechamento mensal. Campanhas antigas pendentes não são liberadas automaticamente pela atualização.
 
 A versão com múltiplos links usa a migração automática `008_multiple_portal_links.sql`. Reimplante o **web** no EasyPanel; não há novas variáveis. O link ativo anterior é preservado. Links que já foram substituídos e invalidados em versões antigas não podem ser recuperados porque suas chaves não eram armazenadas; gere novos links para essas pessoas.
+
+Os relatórios de conclusão no grupo são consolidados por solicitação de disparo, somando todos os lotes e templates, após o último lote terminar. A migração automática `009_campaign_report_groups.sql` mantém o vínculo mesmo após expirar o arquivo enviado. Reimplante **web e worker** juntos para que novas solicitações recebam o vínculo e o worker emita somente o relatório consolidado. Sem novas variáveis de ambiente.

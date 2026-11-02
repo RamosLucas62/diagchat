@@ -88,3 +88,9 @@ test('uma coluna majoritariamente de unidades não libera a linha que contém so
  const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'local',language:'pt_BR',supported:true,body:'Olá {{1}}.\nLocal: {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='local:pt_BR';p.templates=[automaticTemplate(t)];
  const rows=Array.from({length:10},(_,i)=>['Pessoa '+i,'11999991234',i===9?'Dra. Clara Silva':'LAB - Unidade Rua A']);const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Prestador'],rows}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.equal(plan.issues.length,1);assert.equal(plan.issues[0].row,18);assert(plan.issues[0].message.includes('não identifica uma unidade ou endereço'));
 });
+
+test('linhas com mesmo nome e CPF mas sete telefones diferentes geram sete mensagens',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'exames',language:'pt_BR',supported:true,body:'Olá {{1}}.\nData: {{2}}\nLocal: {{3}}\nExames: {{4}}',parameters:['1','2','3','4']};const p=defaultImportProfile();p.fixedTemplate='exames:pt_BR';p.templates=[automaticTemplate(t)];
+ const rows=Array.from({length:7},(_,i)=>[i<3?'Ana Silva':i===3?'Bia Costa':'Carla Lima',i<3?'111.222.333-44':i===3?'222.333.444-55':'333.444.555-66','1199999123'+i,'03/11/2026','LAB - Unidade Rua A','Hemograma']);rows.push([...rows[0]]);
+ const bytes=await workbook([{name:'Lista',headers:['NOME','CPF','CONTATO','DATA DO AGENDAMENTO','PRESTADOR','Procedimento N° DO PEDIDO'],rows}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.summary.rows,8);assert.equal(plan.summary.messages,7);assert.equal(plan.summary.duplicates,1);assert.equal(new Set(plan.segments.flatMap(s=>s.recipients.map(r=>r.phone))).size,7);
+});

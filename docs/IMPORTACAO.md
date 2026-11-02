@@ -34,3 +34,9 @@ Os arquivos originais e os planos de importação ficam no schema privado `app`,
 Continuam os limites de 10 MB por XLSX, 60 MB após descompactar, 31 abas, 50 mil linhas por aba e 100 mil linhas por arquivo. Fórmulas não são executadas nem usadas como valores de contatos ou variáveis. Linhas com telefone inválido ou variável obrigatória ausente geram pendências. Por resposta são exibidas até mil pendências; após resolvê-las e reprocessar, outras pendências podem aparecer.
 
 Clientes existentes recebem um perfil inicial a partir do modo anterior, com identificação automática das variáveis. Associações manuais já salvas são preservadas. Perfis fixos antigos exibem apenas o template fixo selecionado. Nenhuma configuração clínica ou significado de variável é inventado a partir de um exemplo fictício. Os perfis prontos da demonstração usam exclusivamente dados de teste.
+
+## Relatório no grupo
+
+Uma solicitação enviada pelo formulário gera um único relatório consolidado no grupo Evolution, mesmo quando cria vários lotes internos por template, aba, data ou telefone repetido. O aviso é enviado quando todos os lotes terminam ou são cancelados e não há mensagens aguardando processamento ou confirmação. Soma mensagens aceitas, falhas e cancelamentos e mostra o saldo mensal naquele momento. Se há dias diferentes na mesma solicitação, aguarda o último lote. Solicitações diferentes continuam com relatórios separados. O vínculo do relatório permanece após a expiração do arquivo. Avisos antigos já tentados/enviados não são repetidos na atualização.
+
+No modo **Remover somente linhas exatamente iguais**, nome ou CPF repetido não elimina envios para telefones diferentes: três linhas de uma pessoa com três números diferentes geram três mensagens. Apenas a repetição da linha completa é removida dentro da mesma aba.

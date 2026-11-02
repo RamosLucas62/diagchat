@@ -1,5 +1,5 @@
 import {recordError,safeErrorText} from './error-log.js';
-import {groupReport} from './group-report.js';
+import {queueCampaignReports} from './campaign-reports.js';
 import { config } from './config.js';
 import { query,transaction } from './db.js';
 import { sendMeta } from './meta.js';
@@ -17,11 +17,8 @@ export async function maintenance() {
   // Serialized monthly closing and completion: two workers cannot queue the same notice.
   await db.query('select pg_advisory_xact_lock(827462)');
   await db.query(`insert into app.usage(client_id,period,monthly_limit,monthly_fee,overage_rate,plan_name) select id,app.current_period(),monthly_limit,monthly_fee,overage_rate,plan_name from app.clients where active on conflict do nothing`);
-  const completed=(await db.query(`update app.campaigns p set status='completed',completed_at=now() where status in ('running','blocked') and not exists(select 1 from app.messages m where m.campaign_id=p.id and m.state in ('queued','sending','unknown')) returning *`)).rows;
-  for(const p of completed){
-   const [row]=(await db.query(`select c.name,c.group_id,c.overage_mode,coalesce(u.accepted,0) as accepted,coalesce(u.reserved,0) as reserved,coalesce(u.monthly_limit,c.monthly_limit) as monthly_limit,coalesce(u.period,app.current_period())::text as period,(select count(*) from app.messages where campaign_id=$2)::int as total,(select count(*) from app.messages where campaign_id=$2 and state='accepted')::int as sent,(select count(*) from app.messages where campaign_id=$2 and state='failed')::int as failed,(select count(*) from app.messages where campaign_id=$2 and state='cancelled')::int as cancelled from app.clients c left join app.usage u on u.client_id=c.id and u.period=app.current_period() where c.id=$1`,[p.client_id,p.id])).rows;
-   if(row.group_id)await db.query(`insert into app.outbox(kind,reference_id,payload) values('group',$1,$2) on conflict do nothing`,[p.id,JSON.stringify({number:row.group_id,text:groupReport({clientName:row.name,campaignName:p.name,completedAt:p.completed_at,period:row.period,total:row.total,sent:row.sent,failed:row.failed,cancelled:row.cancelled,accepted:row.accepted,reserved:row.reserved,monthlyLimit:row.monthly_limit,overageMode:row.overage_mode})})]);
-  }
+  await db.query(`update app.campaigns p set status='completed',completed_at=now() where status in ('running','blocked') and not exists(select 1 from app.messages m where m.campaign_id=p.id and m.state in ('queued','sending','unknown'))`);
+  await queueCampaignReports(db);
   const invoices=(await db.query(`insert into app.invoices(client_id,period,base_amount,overage_count,overage_amount,total,due_date,plan_name,late_interest_rate,late_interest_basis)
    select u.client_id,u.period,u.monthly_fee,greatest(0,u.accepted-u.monthly_limit),round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),u.monthly_fee+round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),(u.period+interval '1 month')::date+c.due_day-1,coalesce(nullif(u.plan_name,''),c.plan_name),c.late_interest_rate,c.late_interest_basis
    from app.usage u join app.clients c on c.id=u.client_id where u.period<app.current_period() and u.reserved=0 on conflict do nothing returning *`)).rows;
