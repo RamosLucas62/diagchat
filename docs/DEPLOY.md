@@ -90,6 +90,8 @@ Verifique o domínio remetente no Resend e configure `RESEND_FROM`. Em **Finance
 
 Conecte a instância Evolution v2, inclua-a nos grupos e preencha o JID de cada grupo no cadastro do cliente, normalmente terminado em `@g.us`. O sistema usa `POST /message/sendText/{instance}` com cabeçalho `apikey`. Somente os avisos de conclusão usam essa integração; as campanhas usam a API oficial da Meta.
 
+Novos avisos usam o formato “Relatório de Disparo”, com data/hora de São Paulo, cliente, campanha, total de contatos, aceites, falhas e franquia do mês da geração. O saldo disponível é `máximo(0, limite − aceites − reservas)`. A renovação aparece no primeiro dia do mês seguinte. Ao restarem 10% ou menos, o texto informa espera por renovação ou continuidade com adicional, conforme o plano. Cancelamentos e excedentes são exibidos quando maiores que zero. Campanhas com contatos na fila ou sem confirmação continuam abertas e não geram um falso relatório de conclusão. O relatório é um retrato do momento da conclusão; avisos já enfileirados preservam o conteúdo original.
+
 ## 6. Homologação
 
 1. Faça login com o usuário administrativo autorizado.

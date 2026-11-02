@@ -31,7 +31,7 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 - Login administrativo via magic link do Supabase, com PKCE, sessão de 30 dias em cookie HttpOnly, renovação automática e autorização pela lista de administradores. Tokens do provedor ficam criptografados no banco privado.
 - Relatório PDF mensal anexo à cobrança: imagem das métricas, franquia, consumo e discriminação de mensalidade, excedentes e total. NF e boleto em espera.
 - Fechamento mensal automático e cobrança pelo Resend; outbox persistente e idempotência. Confirmação de pagamento manual, sem gateway de pagamento.
-- Resumo de conclusão pela Evolution v2 no grupo do cliente com aceitos, falhas de envio, cancelados, consumo e saldo. Entregas/leituras podem continuar chegando depois.
+- Relatório de conclusão pela Evolution v2 no grupo do cliente: data/hora de São Paulo, campanha, total de contatos, aceites, falhas, franquia, consumo, reservas, saldo real e renovação. Cancelados e excedentes aparecem quando existem; alerta com 10% ou menos disponível, respeitando a política de bloqueio ou adicional.
 
 ## Regras financeiras e de operação
 
