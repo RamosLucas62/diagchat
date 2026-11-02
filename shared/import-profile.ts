@@ -1,6 +1,6 @@
 import {z} from 'zod';
 const aliases=z.array(z.string().trim().min(1).max(160)).max(30);
-export const bindingSchema=z.object({parameter:z.string().regex(/^\d+$/),label:z.string().max(100).default(''),source:z.enum(['auto','column','fixed','sheet_datetime']).default('auto'),aliases:aliases.default([]),value:z.string().max(1024).default(''),transform:z.enum(['text','first_name','date','time','datetime','join']).default('text'),separator:z.string().max(10).default(', '),sheetYear:z.number().int().min(2020).max(2100).nullable().optional()});
+export const bindingSchema=z.object({parameter:z.string().regex(/^\d+$/),label:z.string().max(100).default(''),source:z.enum(['auto','column','fixed','sheet_datetime','column_datetime']).default('auto'),aliases:aliases.default([]),value:z.string().max(1024).default(''),transform:z.enum(['text','first_name','date','time','datetime','join']).default('text'),separator:z.string().max(10).default(', '),dateAliases:aliases.optional(),timeAliases:aliases.optional(),sheetYear:z.number().int().min(2020).max(2100).nullable().optional()});
 const layout=z.object({headerRow:z.number().int().min(1).max(500).optional(),phoneColumn:z.string().max(160).optional()});
 export const importProfileSchema=z.object({
  mode:z.enum(['fixed','form','column']).default('fixed'),fixedTemplate:z.string().max(550).default(''),
