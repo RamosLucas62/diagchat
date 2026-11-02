@@ -1,5 +1,5 @@
 import {recordError} from './error-log.js';
-import {automaticTemplate} from '../shared/import-semantics.js';
+import {automaticTemplate,words} from '../shared/import-semantics.js';
 import {Router,type Response} from 'express';
 import multer from 'multer';
 import {rateLimit} from 'express-rate-limit';
@@ -19,7 +19,7 @@ const overridesSchema=z.record(z.string().max(200),z.object({headerRow:z.number(
 const ignoredSchema=z.array(z.object({sheet:z.string().max(200),row:z.number().int().min(1).max(50000)})).max(5000);
 const allowed=(res:Response,id:string)=>!res.locals.clientId||res.locals.clientId===id;
 async function loadProfile(client:any,available:Template[]){
- const [saved]=await query('select * from app.import_profiles where client_id=$1',[client.id]);if(saved){const config=importProfileSchema.parse(saved.config);if(config.mode==='fixed')config.templates=config.templates.filter(t=>t.key===config.fixedTemplate);config.templates=config.templates.map(t=>({...t,bindings:t.bindings.map(b=>b.source==='column'&&!b.aliases.length?{...b,source:'auto' as const}:b)}));return {config,version:saved.version};}
+ const [saved]=await query('select * from app.import_profiles where client_id=$1',[client.id]);if(saved){const config=importProfileSchema.parse(saved.config);if(config.mode==='fixed')config.templates=config.templates.filter(t=>t.key===config.fixedTemplate);config.templates=config.templates.map(t=>({...t,bindings:t.bindings.map(b=>b.source==='column'&&b.aliases.some(a=>words(a)==='nome da aba')?{...b,source:'sheet_datetime' as const,transform:'datetime' as const,aliases:b.aliases.filter(a=>words(a)!=='nome da aba')}:b.source==='column'&&!b.aliases.length?{...b,source:'auto' as const}:b)}));return {config,version:saved.version};}
  const profile=defaultImportProfile();profile.mode=client.allow_template_selection?'form':'fixed';const usable=available.filter(t=>t.supported);
  const fixed=usable.find(t=>t.name===client.default_template_name&&t.language===client.default_template_language)||(usable.length===1?usable[0]:undefined);profile.fixedTemplate=fixed?`${fixed.name}:${fixed.language}`:'';
  profile.templates=(profile.mode==='fixed'?(fixed?[fixed]:[]):usable).map(automaticTemplate);
@@ -79,7 +79,7 @@ router.post('/import-batches/:id/submit',capacity,async(req,res)=>{
   // A valid submission starts automatically; scheduled campaigns wait for their due time.
   const ids:string[]=[];let reportName='';
   if(!plan.issues.length)for(const [index,segment] of plan.segments.entries()){
-   const scheduledAt=segment.immediate?new Date().toISOString():segment.scheduledAt;const name=await nextPortalCampaignName(db,locked,scheduledAt);if(!reportName)reportName=name;const split=segment.template.lastIndexOf(':');const template=segment.template.slice(0,split),language=segment.template.slice(split+1);
+   const scheduledAt=segment.immediate?new Date().toISOString():segment.scheduledAt;if(!reportName)reportName=await nextPortalCampaignName(db,locked,scheduledAt);const name=reportName;const split=segment.template.lastIndexOf(':');const template=segment.template.slice(0,split),language=segment.template.slice(split+1);
    const [campaign]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source,import_batch_id,import_segment,import_template_signature,report_group_id,report_name) values($1,$2,$3,$4,$5,false,gen_random_uuid(),'running',$6,$7,$8,$9,$7,$10) returning id`,[batch.client_id,name,template,language,scheduledAt,res.locals.clientId?'portal':'admin',id,String(index),templateSignature(available.find(t=>`${t.name}:${t.language}`===segment.template)!),reportName])).rows;
    await db.query(`insert into app.messages(campaign_id,client_id,phone,variables,source_rows) select $1,$2,r.phone,r.variables,r."sourceRows" from jsonb_to_recordset($3::jsonb) as r(phone text,variables jsonb,"sourceRows" jsonb)`,[campaign.id,batch.client_id,JSON.stringify(segment.recipients)]);ids.push(campaign.id);
   }

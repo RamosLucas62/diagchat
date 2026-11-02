@@ -1,3 +1,4 @@
+import {listCampaigns,campaignAction} from './campaigns.js';
 import {recordError,requestErrorLog,safeErrorText} from './error-log.js';
 import express from 'express';
 import {templateSignature} from './import-plan.js';
@@ -159,13 +160,10 @@ app.post('/api/campaigns',async(req,res)=>{
   await db.query(`insert into app.audit(actor,action,target_id) values($1,'campaign.create',$2)`,[res.locals.actor,p.id]);return p;
  });res.json(campaign);
 });
-app.get('/api/campaigns',async(_req,res)=>res.json(await query(`select p.*,c.name as client_name,count(m.id)::int as total,count(*) filter(where m.state='accepted')::int as sent,count(*) filter(where m.delivery in ('delivered','read'))::int as delivered,count(*) filter(where m.delivery='read')::int as read,count(*) filter(where m.state='failed' or m.delivery='failed')::int as failed,count(*) filter(where m.state='unknown')::int as uncertain from app.campaigns p join app.clients c on c.id=p.client_id left join app.messages m on m.campaign_id=p.id ${res.locals.clientId?'where p.client_id=$1':''} group by p.id,c.name order by p.created_at desc limit 100`,res.locals.clientId?[res.locals.clientId]:[])));
+app.get('/api/campaigns',async(_req,res)=>res.json(await listCampaigns(res.locals.clientId)));
 app.post('/api/campaigns/:id/action',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);const {action}=z.object({action:z.enum(['approve','pause','resume','cancel'])}).parse(req.body);
- const [p]=await query('select * from app.campaigns where id=$1',[id]);if(!p)return res.sendStatus(404);
- if(['approve','resume'].includes(action)){const [c]=await query('select * from app.clients where id=$1',[p.client_id]);if(!c.active)return res.status(400).json({error:'Ative o cliente antes de iniciar.'});const currentTemplate=(await templates(c)).find(t=>t.name===p.template_name&&t.language===p.language&&t.supported);if(!currentTemplate)return res.status(400).json({error:'Template indisponível na Meta.'});if(p.import_template_signature&&p.import_template_signature!==templateSignature(currentTemplate))return res.status(400).json({error:'O template mudou desde a importação. Reimporte a planilha com o perfil atualizado antes de enviar.'});}
- const allowed:Record<string,string[]>={approve:['pending'],pause:['running','blocked'],resume:['paused','blocked'],cancel:['pending','running','paused','blocked']};
- await transaction(async db=>{const rows=(await db.query(`update app.campaigns set status=$2 where id=$1 and status=any($3) returning id`,[id,{approve:'running',pause:'paused',resume:'running',cancel:'cancelled'}[action],allowed[action]])).rows;if(!rows.length)throw new Error('A campanha mudou de estado. Atualize a página.');if(action==='cancel')await db.query(`update app.messages set state='cancelled' where campaign_id=$1 and state='queued'`,[id]);await db.query('insert into app.audit(actor,action,target_id) values($1,$2,$3)',[res.locals.actor,`campaign.${action}`,id]);});res.json({ok:true});
+ if(!await campaignAction(id,action,res.locals.actor))return res.sendStatus(404);res.json({ok:true});
 });
 app.get('/api/analytics',async(req,res)=>{const filter=parseAnalyticsFilter(req.query,res.locals.clientId);if(!filter)return res.status(403).json({error:'Cliente não autorizado.'});res.json(await analytics(filter,!!res.locals.clientId));});
 app.get('/api/metrics',async(req,res)=>{

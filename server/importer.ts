@@ -20,6 +20,7 @@ function cellText(cell:ExcelJS.Cell) {
  // Formula results are not trusted as contact data, and formulas are never evaluated.
  if(typeof v==='object'&&('formula' in v||'sharedFormula' in v))return '';
  if(typeof v==='object'&&'richText' in v)return v.richText.map(x=>x.text).join('').trim();
+ if(v instanceof Date&&v.getUTCFullYear()<=1900&&/[hs]/i.test(cell.numFmt||'')&&!/[yd]/i.test(cell.numFmt||''))return v.toISOString().slice(11,16);
  if(v instanceof Date)return v.toISOString().replace(/T00:00:00.000Z$/,'').replace(/\.000Z$/,'');
  return cell.text.trim();
 }

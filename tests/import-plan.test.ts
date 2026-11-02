@@ -94,3 +94,16 @@ test('linhas com mesmo nome e CPF mas sete telefones diferentes geram sete mensa
  const rows=Array.from({length:7},(_,i)=>[i<3?'Ana Silva':i===3?'Bia Costa':'Carla Lima',i<3?'111.222.333-44':i===3?'222.333.444-55':'333.444.555-66','1199999123'+i,'03/11/2026','LAB - Unidade Rua A','Hemograma']);rows.push([...rows[0]]);
  const bytes=await workbook([{name:'Lista',headers:['NOME','CPF','CONTATO','DATA DO AGENDAMENTO','PRESTADOR','Procedimento N° DO PEDIDO'],rows}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.summary.rows,8);assert.equal(plan.summary.messages,7);assert.equal(plan.summary.duplicates,1);assert.equal(new Set(plan.segments.flatMap(s=>s.recipients.map(r=>r.phone))).size,7);
 });
+
+test('data da aba mais horário Excel preenche uma única variável sem enviar a data-base de 1899',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'agenda',language:'pt_BR',supported:true,body:'Olá {{1}}.\nData: {{2}}\nExames: {{3}}',parameters:['1','2','3']};const p=defaultImportProfile();p.fixedTemplate='agenda:pt_BR';p.templates=[automaticTemplate(t)];
+ const book=new ExcelJS.Workbook();for(const [name,time] of [['05-11',new Date('1899-12-30T09:00:00Z')],['06-11',0.375]] as const){const s=book.addWorksheet(name);s.getRow(2).values=['Nome do paciente','Telefone','HORARIO','Procedimento'];s.getRow(3).values=['Ana Silva','11999991234',time,'Hemograma'];s.getCell('C3').numFmt='hh:mm';}
+ const bytes=Buffer.from(await book.xlsx.writeBuffer());const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.segments[0].recipients[0].variables[1],'05/11/2026 09:00');assert.equal(plan.segments[1].recipients[0].variables[1],'06/11/2026 09:00');assert(!JSON.stringify(plan.segments).includes('1899'));
+ const b=p.templates[0].bindings[1];b.source='column';b.aliases=['HORARIO','NOME DA ABA'];b.label='Data do atendimento';b.transform='join';const legacy=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(legacy.issues,[]);assert.equal(legacy.segments[0].recipients[0].variables[1],'05/11/2026 09:00');
+ b.source='sheet_datetime';b.aliases=['HORARIO'];b.sheetYear=2027;const explicit=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(explicit.issues,[]);assert.equal(explicit.segments[0].recipients[0].variables[1],'05/11/2027 09:00');
+});
+test('data da aba com horário exige uma data válida e uma única coluna de horário',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'agenda',language:'pt_BR',supported:true,body:'Olá {{1}}. Data: {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='agenda:pt_BR';p.templates=[automaticTemplate(t)];p.templates[0].bindings[1].source='sheet_datetime';
+ const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Horario'],rows:[['Ana','11999991234','09:00']]}]);assert((await buildImportPlan(bytes,p,[t],{now})).issues.some(i=>i.message.includes('Data da aba')));
+ const ambiguous=await workbook([{name:'05-11',headers:['Nome','Telefone','Horario','Hora'],rows:[['Ana','11999991234','09:00','10:00']]}]);assert((await buildImportPlan(ambiguous,p,[t],{now})).issues.some(i=>i.message.includes('Horário da linha ausente ou ambíguo')));
+});
