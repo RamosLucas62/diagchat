@@ -1,3 +1,4 @@
+import {automaticTemplate} from '../shared/import-semantics.js';
 import {Router,type Response} from 'express';
 import multer from 'multer';
 import {rateLimit} from 'express-rate-limit';
@@ -17,10 +18,10 @@ const overridesSchema=z.record(z.string().max(200),z.object({headerRow:z.number(
 const ignoredSchema=z.array(z.object({sheet:z.string().max(200),row:z.number().int().min(1).max(50000)})).max(5000);
 const allowed=(res:Response,id:string)=>!res.locals.clientId||res.locals.clientId===id;
 async function loadProfile(client:any,available:Template[]){
- const [saved]=await query('select * from app.import_profiles where client_id=$1',[client.id]);if(saved)return {config:importProfileSchema.parse(saved.config),version:saved.version};
+ const [saved]=await query('select * from app.import_profiles where client_id=$1',[client.id]);if(saved){const config=importProfileSchema.parse(saved.config);if(config.mode==='fixed')config.templates=config.templates.filter(t=>t.key===config.fixedTemplate);config.templates=config.templates.map(t=>({...t,bindings:t.bindings.map(b=>b.source==='column'&&!b.aliases.length?{...b,source:'auto' as const}:b)}));return {config,version:saved.version};}
  const profile=defaultImportProfile();profile.mode=client.allow_template_selection?'form':'fixed';const usable=available.filter(t=>t.supported);
  const fixed=usable.find(t=>t.name===client.default_template_name&&t.language===client.default_template_language)||(usable.length===1?usable[0]:undefined);profile.fixedTemplate=fixed?`${fixed.name}:${fixed.language}`:'';
- profile.templates=usable.map(t=>({key:`${t.name}:${t.language}`,bindings:t.parameters.map(parameter=>({parameter,label:'',source:'column' as const,aliases:[],value:'',transform:'text' as const,separator:', '}))}));
+ profile.templates=(profile.mode==='fixed'?(fixed?[fixed]:[]):usable).map(automaticTemplate);
  return {config:profile,version:0};
 }
 function publicBatch(row:any){const plan=row.result as ImportPlan;return {id:row.id,client_id:row.client_id,client_name:row.client_name,file_name:row.file_name,status:row.status,requested_at:row.requested_at,created_at:row.created_at,issues:plan.issues,summary:plan.summary,campaign_ids:row.campaign_ids};}
@@ -28,12 +29,13 @@ async function clientFor(id:string){const [client]=await query('select * from ap
 router.get('/clients/:id/import-profile',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);const client=await clientFor(id);if(!client)return res.sendStatus(404);const available=await templates(client);res.json({...await loadProfile(client,available),templates:available});});
 router.put('/clients/:id/import-profile',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);const {config,version}=z.object({config:importProfileSchema,version:z.number().int().min(0)}).parse(req.body);const client=await clientFor(id);if(!client)return res.sendStatus(404);
+ if(config.mode==='fixed')config.templates=config.templates.filter(t=>t.key===config.fixedTemplate);
  const available=await templates(client);const configured=new Set(config.templates.map(t=>t.key));
- if(!config.phoneAliases.length)return res.status(400).json({error:'Defina ao menos um nome para a coluna de telefone.'});
+
  if(config.mode==='fixed'&&!configured.has(config.fixedTemplate))return res.status(400).json({error:'Defina o template fixo e suas variáveis.'});
  if(config.mode==='column'&&config.routes.some(r=>!configured.has(r.template)))return res.status(400).json({error:'Configure todos os templates usados nas regras.'});
  if(config.mode==='form'&&!configured.size)return res.status(400).json({error:'Libere ao menos um template para o formulário.'});
- for(const rule of config.templates){const t=available.find(t=>`${t.name}:${t.language}`===rule.key&&t.supported);if(!t)return res.status(400).json({error:'Template indisponível ou incompatível na Meta.'});if(rule.bindings.length!==t.parameters.length||t.parameters.some(p=>!rule.bindings.some(b=>b.parameter===p)))return res.status(400).json({error:'Configure todas as variáveis do template '+t.name+'.'});if(rule.bindings.some(b=>b.source==='column'?!b.aliases.length:!b.value.trim()))return res.status(400).json({error:'Preencha a origem de cada variável do template '+t.name+'.'});}
+ for(const rule of config.templates){const t=available.find(t=>`${t.name}:${t.language}`===rule.key&&t.supported);if(!t)return res.status(400).json({error:'Template indisponível ou incompatível na Meta.'});if(rule.bindings.length!==t.parameters.length||t.parameters.some(p=>!rule.bindings.some(b=>b.parameter===p)))return res.status(400).json({error:'Configure todas as variáveis do template '+t.name+'.'});if(rule.bindings.some(b=>b.source==='column'?!b.aliases.length:b.source==='fixed'?!b.value.trim():false))return res.status(400).json({error:'Preencha a origem de cada variável do template '+t.name+'.'});}
  config.templates=config.templates.map(rule=>({...rule,signature:templateSignature(available.find(t=>`${t.name}:${t.language}`===rule.key)!)}));
  const result=await transaction(async db=>{await db.query('select id from app.clients where id=$1 for update',[id]);const [current]=(await db.query('select version from app.import_profiles where client_id=$1',[id])).rows;if((current?.version||0)!==version)return null;const [saved]=(await db.query('insert into app.import_profiles(client_id,config) values($1,$2) on conflict(client_id) do update set config=$2,version=app.import_profiles.version+1,updated_at=now() returning version',[id,JSON.stringify(config)])).rows;await db.query("insert into app.audit(actor,action,target_id) values($1,'import.profile.update',$2)",[res.locals.actor,id]);return saved;});
  if(!result)return res.status(409).json({error:'O perfil foi alterado por outra pessoa. Reabra para atualizar.'});res.json(result);

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import ExcelJS from 'exceljs';
+import {automaticTemplate} from '../shared/import-semantics.js';
 import {defaultImportProfile} from '../shared/import-profile.js';
 const base='http://127.0.0.1:3102';
 const child=spawn(process.execPath,['--import','tsx','server/index.ts'],{env:{...process.env,DEMO_MODE:'true',NODE_ENV:'test',PORT:'3102',APP_URL:base},stdio:['ignore','pipe','pipe']});let output='';child.stderr.on('data',c=>{output+=c;});
@@ -21,5 +22,14 @@ try{
  const both=await Promise.all([call(`/import-batches/${batch.id}/submit`,'POST',{consent:true}),call(`/import-batches/${batch.id}/submit`,'POST',{consent:true})]);assert(both.every(x=>x.status===200),JSON.stringify(both));assert.deepEqual(both[0].data.campaign_ids,both[1].data.campaign_ids);assert.equal(both[0].data.campaign_ids.length,3);const campaigns=(await call('/campaigns','GET',undefined,token)).data;assert.equal(campaigns.length,3);assert(campaigns.every((c:any)=>c.status==='pending'));assert(campaigns.some((c:any)=>c.template_name==='lembrete_agendamento'&&c.total===1));assert(campaigns.some((c:any)=>c.name.includes('04.11.30')));assert(campaigns.some((c:any)=>c.name.includes('05.11.30')));
  assert.equal((await call(`/campaigns/${campaigns[0].id}/action`,'POST',{action:'approve'},token)).status,403);assert.equal((await call(`/campaigns/${campaigns[0].id}/action`,'POST',{action:'approve'})).status,200);
  const file=await fetch(base+`/api/import-batches/${batch.id}/file`);assert.equal(file.status,200);assert.equal((await file.arrayBuffer()).byteLength,bytes.length);
+ // Fixed mode persists a single template even if a stale UI sends multiple entries.
+ const currentProfile=(await call(`/clients/${cid}/import-profile`)).data;
+ const available=currentProfile.templates;
+ const fixedProfile=defaultImportProfile();fixedProfile.fixedTemplate='lembrete_agendamento:pt_BR';fixedProfile.templates=available.filter((t:any)=>t.supported).map(automaticTemplate);
+ const savedFixed=await call(`/clients/${cid}/import-profile`,'PUT',{config:fixedProfile,version:currentProfile.version});assert.equal(savedFixed.status,200,JSON.stringify(savedFixed.data));
+ const loadedFixed=(await call(`/clients/${cid}/import-profile`)).data;assert.equal(loadedFixed.config.templates.length,1);assert.equal(loadedFixed.config.templates[0].key,fixedProfile.fixedTemplate);
+ const automaticBook=new ExcelJS.Workbook();const automaticSheet=automaticBook.addWorksheet('Lista');automaticSheet.getRow(12).values=['Patient name','Phone number','Appointment date'];automaticSheet.getRow(13).values=['Ana Silva','11999991234','2030-11-05'];
+ const automaticFile=new FormData();automaticFile.append('file',new Blob([Buffer.from(await automaticBook.xlsx.writeBuffer())]),'automatico.xlsx');automaticFile.append('client_id',cid);automaticFile.append('request_key',crypto.randomUUID());
+ const automaticBatch=await call('/import-batches','POST',automaticFile,token);assert.equal(automaticBatch.status,200);assert.equal(automaticBatch.data.status,'ready',JSON.stringify(automaticBatch.data));assert.equal(automaticBatch.data.summary.messages,1);
  console.log('Importação HTTP: perfil versionado, roteamento, agrupamento, abas, revisão privada, exclusão explícita, consentimento, isolamento e submissão concorrente sem duplicação validados.');
 }finally{child.kill('SIGTERM');}

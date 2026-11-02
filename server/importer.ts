@@ -1,3 +1,4 @@
+import {words,columnSemantic} from '../shared/import-semantics.js';
 import ExcelJS from 'exceljs';
 import yauzl from 'yauzl';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
@@ -43,7 +44,7 @@ export async function parseWorkbook(buffer:Buffer,overrides:Record<string,{heade
   totalRows+=sheet.rowCount;if(totalRows>100000)throw new Error('Limite de 100.000 linhas por arquivo.');
   const raw:string[][]=[];
   for(let i=1;i<=sheet.rowCount;i++)raw.push(Array.from({length:sheet.columnCount},(_,j)=>cellText(sheet.getCell(i,j+1))));
-  const matchesPhone=(s:string)=>options.phoneAliases?options.phoneAliases.some(a=>normalize(a)===normalize(s)):phoneHeader(s);
+  const matchesPhone=(s:string)=>phoneHeader(s)||!!options.phoneAliases?.some(a=>normalize(a)===normalize(s))||(!!options.keepDuplicates&&/\b(telefone|celular|whatsapp|whats|fone|phone|mobile|tel|numero)\b/.test(words(s))&&!/\b(cpf|pedido|protocolo|codigo|documento)\b/.test(words(s)));
   const override=overrides[sheet.name]; let header=(override?.headerRow||options.headerRow||0)-1;
   if(header<0) {
    let best=-1,tied=false;
@@ -56,9 +57,14 @@ export async function parseWorkbook(buffer:Buffer,overrides:Record<string,{heade
   result.columns=raw[header].map((s,i)=>{const base=s||`Coluna ${i+1}`;const n=(counts.get(base)||0)+1;counts.set(base,n);return n>1?`${base} (${n})`:base;});
   const candidates=raw[header].map((s,i)=>matchesPhone(s)?i:-1).filter(i=>i>=0);
   let phoneIndex=override?.phoneColumn?result.columns.indexOf(override.phoneColumn):candidates.length===1?candidates[0]:-1;
+  if(!override?.phoneColumn&&options.keepDuplicates&&candidates.length>1){
+   const ranked=candidates.map(index=>{const values=raw.slice(header+1,header+101).map(r=>r[index]||'').filter(Boolean).filter(v=>!matchesPhone(v));return {index,valid:values.filter(v=>normalizePhone(v)).length,total:values.length};}).sort((a,b)=>b.valid/Math.max(b.total,1)-a.valid/Math.max(a.total,1));
+   // Content disambiguates an empty/invalid column, but two valid destinations need review.
+   if(ranked[0].valid&&ranked[1].valid===0)phoneIndex=ranked[0].index;
+  }
   if(phoneIndex<0){result.warnings.push(candidates.length>1?'Mais de uma coluna de telefone. Selecione a correta.':'Selecione a coluna de telefone.');sheets.push(result);continue;}
   result.phoneColumn=result.columns[phoneIndex];
-  const nameIndex=raw[header].findIndex(s=>options.nameAliases?options.nameAliases.some(a=>normalize(a)===normalize(s)):/^(nome|name|cliente|nome completo)$/.test(normalize(s)));const seen=new Set<string>();
+  const nameIndex=raw[header].findIndex(s=>columnSemantic(s)==='name'||!!options.nameAliases?.some(a=>normalize(a)===normalize(s)));const seen=new Set<string>();
   raw.slice(header+1).forEach((row,index)=>{
    if(!row.some(Boolean)||matchesPhone(row[phoneIndex]||''))return;
    if(options.keepDuplicates&&!row[phoneIndex]&&row.filter(Boolean).length<=1)return;

@@ -43,3 +43,25 @@ test('o mesmo telefone não junta pessoas de nome completo diferente nem perde d
 test('alterar o texto do template aprovado exige reconfirmar o perfil',async()=>{
  const p=profile();p.templates[0].signature=templateSignature(templates[0]);const bytes=await workbook([{name:'Lista',headers,rows:[ana]}]);const changed=templates.map(t=>({...t,body:t.body+' Nova orientação.'}));const plan=await buildImportPlan(bytes,p,changed,{now});assert.equal(plan.summary.messages,0);assert(plan.issues[0].message.includes('template mudou'));
 });
+
+test('identifica telefone e variáveis pelo contexto sem associação manual, inclusive em abas e cabeçalhos tardios',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');
+ const t={name:'confirmacao',language:'pt_BR',supported:true,body:'Olá {{1}}!\nData: {{2}}\nProcedimentos: {{3}}\nLocal: {{4}}\nPrestador: {{5}}',parameters:['1','2','3','4','5']};
+ const p=defaultImportProfile();p.fixedTemplate='confirmacao:pt_BR';p.templates=[automaticTemplate(t)];
+ const bytes=await workbook([{name:'Lista',headerRow:23,headers:['CPF','PRESTADOR','PHONE','PROCEDIMENTO','DATA DO AGENDAMENTO','NOME DO PACIENTE','LOCAL','Data de nascimento'],rows:[['029.029.611-03','Dra. Clara','11999991234','Hemograma',new Date('2026-11-05T00:00:00Z'),'Ana Silva','Unidade A','01/01/1980']]}]);
+ const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.sheets[0].headerRow,23);assert.deepEqual(plan.segments[0].recipients[0].variables,['Ana Silva','05/11/2026','Hemograma','Unidade A','Dra. Clara']);
+ const synonyms=await workbook([{name:'Outra aba',headers:['Número de contato','Patient name','Appointment date','Serviço','Endereço','Profissional responsável'],rows:[['11999991234','Ana Silva','2026-11-05','Consulta','Unidade A','Dr. Pedro']]}]);
+ const second=await buildImportPlan(synonyms,p,[t],{now});assert.deepEqual(second.issues,[]);assert.equal(second.segments[0].recipients[0].variables[4],'Dr. Pedro');
+});
+test('conteúdo resolve uma coluna de telefone inválida e mantém revisão se ambos os destinos forem válidos',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');const t=templates[1],p=defaultImportProfile();p.fixedTemplate='retorno:pt_BR';p.templates=[automaticTemplate(t)];
+ const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Celular'],rows:[['Ana','não informado','11999991234']]}]);
+ const plan=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.sheets[0].phoneColumn,'Celular');
+ const both=await workbook([{name:'Lista',headers:['Nome','Telefone','Celular'],rows:[['Ana','11988881234','11999991234']]}]);assert((await buildImportPlan(both,p,[t],{now})).issues.some(i=>i.message.includes('Mais de uma coluna')));
+});
+test('não inventa a origem de variáveis sem contexto nem escolhe entre duas datas válidas',async()=>{
+ const {automaticTemplate}=await import('../shared/import-semantics.js');let t={...templates[1],body:'Olá {{1}}. {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='retorno:pt_BR';p.templates=[automaticTemplate(t)];
+ const bytes=await workbook([{name:'Lista',headers:['Nome','Telefone','Data consulta','Data exame'],rows:[['Ana','11999991234','2026-11-05','2026-11-06']]}]);
+ const unknown=await buildImportPlan(bytes,p,[t],{now});assert.equal(unknown.summary.messages,0);assert(unknown.issues.some(i=>i.message.includes('interpretar a variável {{2}}')));
+ t={...t,body:'Olá {{1}}. Data: {{2}}'};const ambiguous=await buildImportPlan(bytes,p,[t],{now});assert.equal(ambiguous.summary.messages,0);assert(ambiguous.issues.some(i=>i.message.includes('Mais de uma coluna')));
+});
