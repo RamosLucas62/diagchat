@@ -1,3 +1,4 @@
+import {recordError,safeErrorText} from './error-log.js';
 import {groupReport} from './group-report.js';
 import { config } from './config.js';
 import { query,transaction } from './db.js';
@@ -6,12 +7,12 @@ import {queueInvoiceEmail} from './billing.js';
 import {ensureInvoiceReport,reportAttachment} from './reports.js';
 export async function dispatchOne() {
  const [{job}]=await query('select app.claim_message() as job');if(!job)return false;
- let result;try{result=await sendMeta(job);}catch{result={state:'unknown',id:null,error:'Resposta incerta. Aguardando webhook; não reenviar automaticamente.'};}
- await query('select app.finish_message($1,$2,$3,$4)',[job.message.id,result.state,result.id,result.error]);return true;
+ let result;try{result=await sendMeta(job);}catch(e){result={state:'unknown',id:null,error:'Resposta incerta. Aguardando webhook; não reenviar automaticamente. '+safeErrorText(e)};}
+ await query('select app.finish_message($1,$2,$3,$4)',[job.message.id,result.state,result.id,result.error]);if(result.state!=='accepted')await recordError({source:'meta',operation:'Enviar mensagem pela Cloud API',code:result.state,error:result.error,clientId:job.client.id,campaignId:job.campaign.id});return true;
 }
 export async function maintenance() {
  await query('delete from app.import_batches where expires_at<now()');
- await query(`update app.messages set state='unknown',error='Processo interrompido; aguardando confirmação da Meta.' where state='sending' and claimed_at<now()-interval '2 minutes'`);
+ const interrupted=await query(`update app.messages set state='unknown',error='Processo interrompido; aguardando confirmação da Meta.' where state='sending' and claimed_at<now()-interval '2 minutes' returning client_id,campaign_id`);for(const item of interrupted)await recordError({source:'worker',operation:'Recuperação de mensagem interrompida',code:'MESSAGE_UNKNOWN',error:'Processo interrompido; aguardando confirmação da Meta, sem reenvio automático.',clientId:item.client_id,campaignId:item.campaign_id});
  await transaction(async db=>{
   // Serialized monthly closing and completion: two workers cannot queue the same notice.
   await db.query('select pg_advisory_xact_lock(827462)');
@@ -21,8 +22,8 @@ export async function maintenance() {
    const [row]=(await db.query(`select c.name,c.group_id,c.overage_mode,coalesce(u.accepted,0) as accepted,coalesce(u.reserved,0) as reserved,coalesce(u.monthly_limit,c.monthly_limit) as monthly_limit,coalesce(u.period,app.current_period())::text as period,(select count(*) from app.messages where campaign_id=$2)::int as total,(select count(*) from app.messages where campaign_id=$2 and state='accepted')::int as sent,(select count(*) from app.messages where campaign_id=$2 and state='failed')::int as failed,(select count(*) from app.messages where campaign_id=$2 and state='cancelled')::int as cancelled from app.clients c left join app.usage u on u.client_id=c.id and u.period=app.current_period() where c.id=$1`,[p.client_id,p.id])).rows;
    if(row.group_id)await db.query(`insert into app.outbox(kind,reference_id,payload) values('group',$1,$2) on conflict do nothing`,[p.id,JSON.stringify({number:row.group_id,text:groupReport({clientName:row.name,campaignName:p.name,completedAt:p.completed_at,period:row.period,total:row.total,sent:row.sent,failed:row.failed,cancelled:row.cancelled,accepted:row.accepted,reserved:row.reserved,monthlyLimit:row.monthly_limit,overageMode:row.overage_mode})})]);
   }
-  const invoices=(await db.query(`insert into app.invoices(client_id,period,base_amount,overage_count,overage_amount,total,due_date,plan_name)
-   select u.client_id,u.period,u.monthly_fee,greatest(0,u.accepted-u.monthly_limit),round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),u.monthly_fee+round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),(u.period+interval '1 month')::date+c.due_day-1,coalesce(nullif(u.plan_name,''),c.plan_name)
+  const invoices=(await db.query(`insert into app.invoices(client_id,period,base_amount,overage_count,overage_amount,total,due_date,plan_name,late_interest_rate,late_interest_basis)
+   select u.client_id,u.period,u.monthly_fee,greatest(0,u.accepted-u.monthly_limit),round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),u.monthly_fee+round(greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2),(u.period+interval '1 month')::date+c.due_day-1,coalesce(nullif(u.plan_name,''),c.plan_name),c.late_interest_rate,c.late_interest_basis
    from app.usage u join app.clients c on c.id=u.client_id where u.period<app.current_period() and u.reserved=0 on conflict do nothing returning *`)).rows;
   for(const invoice of invoices){await ensureInvoiceReport(db,invoice.id);await queueInvoiceEmail(db,invoice.id,true);}
  });
@@ -47,14 +48,14 @@ export async function processOutbox() {
   }
  }
  const ready=item.kind==='invoice'?config.resend&&config.from:config.evolution&&config.evolutionKey&&config.evolutionInstance;
- if(!ready){await query(`update app.outbox set status='pending',next_attempt_at=now()+interval '5 minutes',last_error='Configuração da integração pendente' where id=$1`,[item.id]);return;}
+ if(!ready){await recordError({source:item.kind==='invoice'?'resend':'evolution',operation:'Enviar notificação',code:'CONFIGURATION',error:'Configuração da integração pendente.'});await query(`update app.outbox set status='pending',next_attempt_at=now()+interval '5 minutes',last_error='Configuração da integração pendente' where id=$1`,[item.id]);return;}
  if(item.kind==='invoice'&&item.first_attempt_at&&Date.now()-new Date(item.first_attempt_at).getTime()>23*3600000){await query(`update app.outbox set status='review',last_error='Janela de idempotência encerrada; confira o Resend antes de reenviar.' where id=$1`,[item.id]);return;}
  if(item.kind==='invoice'&&!item.first_attempt_at&&!item.payload.attachments?.length){try{const report=await transaction(db=>ensureInvoiceReport(db,item.reference_id));item.payload.attachments=[reportAttachment(report)];}catch{await query("update app.outbox set status='review',last_error='Não foi possível gerar o relatório mensal. Nenhum e-mail foi enviado.' where id=$1",[item.id]);return;}}
  if(item.kind==='invoice'&&!item.payload.from)item.payload.from=config.from;
  await query('update app.outbox set first_attempt_at=coalesce(first_attempt_at,now()),payload=$2 where id=$1',[item.id,JSON.stringify(item.payload)]);
  try{
   const response=await fetch(item.kind==='invoice'?'https://api.resend.com/emails':`${config.evolution}/message/sendText/${encodeURIComponent(config.evolutionInstance!)}`,{method:'POST',headers:item.kind==='invoice'?{Authorization:`Bearer ${config.resend}`,'Content-Type':'application/json','Idempotency-Key':`invoice/${item.reference_id}`}:{apikey:config.evolutionKey!,'Content-Type':'application/json'},body:JSON.stringify(item.payload),signal:AbortSignal.timeout(20000)});
-  const body:any=await response.json();if(!response.ok)throw new Error(`Provedor HTTP ${response.status}`);
+  const body:any=await response.json();if(!response.ok)throw new Error(`Provedor HTTP ${response.status}: ${body.message||body.error?.message||body.error||'Resposta sem descrição'}`);
   await query(`update app.outbox set status='sent',provider_id=$2,last_error=null where id=$1`,[item.id,body.id||body.key?.id||null]);
- }catch(e){const retry=item.kind==='invoice'&&item.attempts<8;await query(`update app.outbox set status=$2,last_error=$3,next_attempt_at=now()+interval '10 minutes' where id=$1`,[item.id,retry?'pending':'review',e instanceof Error?e.message:'Falha de comunicação']);}
+ }catch(e){await recordError({source:item.kind==='invoice'?'resend':'evolution',operation:'Enviar notificação',code:'PROVIDER_ERROR',error:e,details:'Registro da fila: '+item.id});const retry=item.kind==='invoice'&&item.attempts<8;await query(`update app.outbox set status=$2,last_error=$3,next_attempt_at=now()+interval '10 minutes' where id=$1`,[item.id,retry?'pending':'review',e instanceof Error?e.message:'Falha de comunicação']);}
 }

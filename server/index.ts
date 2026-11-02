@@ -1,3 +1,4 @@
+import {recordError,requestErrorLog,safeErrorText} from './error-log.js';
 import express from 'express';
 import {templateSignature} from './import-plan.js';
 import {importRouter} from './import-routes.js';
@@ -23,7 +24,7 @@ await prepareDatabase();
 if(demo){const {seedDemo}=await import('./demo.js');await seedDemo();}
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
 app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'data:','https:'],connectSrc:["'self'"],fontSrc:["'self'"],objectSrc:["'none'"],frameAncestors:["'none'"]}},referrerPolicy:{policy:'no-referrer'}}));
-app.use(cookieParser());app.use('/api',(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
+app.use(requestErrorLog);app.use(cookieParser());app.use('/api',(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
 app.get('/api/health',async(_req,res)=>{try{await query('select 1');res.json({ok:true});}catch{res.status(503).json({ok:false});}});
 // Raw bytes must be preserved for signature verification before JSON parsing.
 app.get('/api/webhook/:id',async(req,res)=>{
@@ -41,7 +42,8 @@ app.post('/api/webhook/:id',express.raw({type:'application/json',limit:'2mb'}),a
    for(const change of entry.changes||[]){const value=change.value;if(value?.metadata?.phone_number_id!==c.phone_id)continue;
     for(const status of value.statuses||[]){if(!['sent','delivered','read','failed'].includes(status.status)||!status.id||!/^\d+$/.test(String(status.timestamp)))continue;
      const eventKey=hash(`${c.id}/${status.id}/${status.status}/${status.timestamp}`);
-     await db.query(`insert into app.webhook_events(event_key,client_id,provider_id,status,message_ref,occurred_at) values($1,$2,$3,$4,$5,to_timestamp($6)) on conflict do nothing`,[eventKey,c.id,status.id,status.status,status.biz_opaque_callback_data||null,Number(status.timestamp)]);
+     const event=await db.query(`insert into app.webhook_events(event_key,client_id,provider_id,status,message_ref,occurred_at) values($1,$2,$3,$4,$5,to_timestamp($6)) on conflict do nothing returning event_key`,[eventKey,c.id,status.id,status.status,status.biz_opaque_callback_data||null,Number(status.timestamp)]);
+     if(event.rows.length&&status.status==='failed')await db.query('insert into app.error_logs(source,operation,code,message,client_id) values($1,$2,$3,$4,$5)',['meta','Webhook de falha da mensagem',String(status.errors?.[0]?.code||'DELIVERY_FAILED'),safeErrorText((status.errors||[]).map((e:any)=>[e.title,e.message,e.error_data?.details].filter(Boolean).join(' · ')).join('\n')||'A Meta informou falha na mensagem.'),c.id]);
     }
     for(const message of value.messages||[]){if(/^(sair|parar|stop|cancelar)$/i.test(message.text?.body?.trim()||'')){
      const phone=normalizePhone(message.from);if(phone)await db.query('insert into app.suppressions(client_id,phone) values($1,$2) on conflict do nothing',[c.id,phone]);
@@ -97,12 +99,18 @@ async function auth(req:express.Request,res:express.Response,next:express.NextFu
 function admin(_req:express.Request,res:express.Response,next:express.NextFunction){if(res.locals.clientId)return res.status(403).json({error:'Acesso administrativo necessário.'});next();}
 app.use('/api',auth);
 app.use('/api',importRouter);
+app.get('/api/error-logs',admin,async(req,res)=>{
+ const filter=z.object({source:z.enum(['','web','worker','meta','resend','evolution','import','browser']).default(''),status:z.enum(['open','resolved','all']).default('open')}).parse(req.query);
+ res.json(await query(`select e.*,c.name as client_name,p.name as campaign_name from app.error_logs e left join app.clients c on c.id=e.client_id left join app.campaigns p on p.id=e.campaign_id where ($1='' or e.source=$1) and ($2='all' or ($2='open' and e.resolved_at is null) or ($2='resolved' and e.resolved_at is not null)) order by e.occurred_at desc limit 200`,[filter.source,filter.status]));
+});
+app.post('/api/error-logs/:id/resolve',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);await query('update app.error_logs set resolved_at=coalesce(resolved_at,now()) where id=$1',[id]);res.json({ok:true});});
+app.post('/api/error-events',rateLimit({windowMs:60000,limit:20}),async(req,res)=>{const input=z.object({operation:z.string().max(200),message:z.string().max(2000)}).parse(req.body);await recordError({source:'browser',operation:input.operation,error:input.message,clientId:res.locals.clientId,requestId:res.locals.requestId});res.json({ok:true});});
 const publicColumns='id,name,photo_url,plan_name,monthly_limit,overage_mode,overage_rate,active,portal_slug,allow_template_selection,default_template_name,default_template_language';
-const adminColumns=publicColumns+',email,waba_id,phone_id,group_id,throughput,monthly_fee,cost_rate,due_day,verify_token,created_at';
+const adminColumns=publicColumns+',email,waba_id,phone_id,group_id,throughput,monthly_fee,cost_rate,due_day,late_interest_rate,late_interest_basis,verify_token,created_at';
 async function clientRows(clientId?:string){return query(`select ${clientId?publicColumns:adminColumns},coalesce((select accepted from app.usage where client_id=c.id and period=app.current_period()),0) as used,coalesce((select reserved from app.usage where client_id=c.id and period=app.current_period()),0) as reserved,coalesce((select monthly_limit from app.usage where client_id=c.id and period=app.current_period()),monthly_limit) as current_limit from app.clients c ${clientId?'where id=$1':''} order by created_at desc`,clientId?[clientId]:[]);}
 app.get('/api/session',async(_req,res)=>{res.json({demo,portal:!!res.locals.clientId,clientId:res.locals.clientId||null});});
 app.get('/api/clients',async(_req,res)=>res.json(await clientRows(res.locals.clientId)));
-const clientSchema=z.object({name:z.string().trim().min(2).max(120),email:z.email(),photo_url:z.string().max(700000).default('').refine(safePhoto,'Foto inválida: use HTTPS, JPG, PNG ou WebP.'),waba_id:z.string().regex(/^\d+$/),phone_id:z.string().regex(/^\d+$/),token:z.string().max(5000).optional(),app_secret:z.string().max(200).optional(),group_id:z.string().max(150).default(''),throughput:z.coerce.number().int().min(1).max(1000),plan_name:z.string().min(1).max(100),monthly_limit:z.coerce.number().int().min(0).max(100000000),monthly_fee:z.coerce.number().min(0).max(10000000),overage_mode:z.enum(['block','charge']),overage_rate:z.coerce.number().min(0).max(1000),cost_rate:z.coerce.number().min(0).max(1000),due_day:z.coerce.number().int().min(1).max(28),active:z.boolean().default(true),allow_template_selection:z.boolean().default(false),default_template_name:z.string().regex(/^[a-z0-9_]*$/).max(512).default(''),default_template_language:z.string().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).default('pt_BR')});
+const clientSchema=z.object({name:z.string().trim().min(2).max(120),email:z.email(),photo_url:z.string().max(700000).default('').refine(safePhoto,'Foto inválida: use HTTPS, JPG, PNG ou WebP.'),waba_id:z.string().regex(/^\d+$/),phone_id:z.string().regex(/^\d+$/),token:z.string().max(5000).optional(),app_secret:z.string().max(200).optional(),group_id:z.string().max(150).default(''),throughput:z.coerce.number().int().min(1).max(1000),plan_name:z.string().min(1).max(100),monthly_limit:z.coerce.number().int().min(0).max(100000000),monthly_fee:z.coerce.number().min(0).max(10000000),overage_mode:z.enum(['block','charge']),overage_rate:z.coerce.number().min(0).max(1000),cost_rate:z.coerce.number().min(0).max(1000),due_day:z.coerce.number().int().min(1).max(28),late_interest_rate:z.coerce.number().min(0).max(100).default(0),late_interest_basis:z.enum(['daily','monthly']).default('monthly'),active:z.boolean().default(true),allow_template_selection:z.boolean().default(false),default_template_name:z.string().regex(/^[a-z0-9_]*$/).max(512).default(''),default_template_language:z.string().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).default('pt_BR')});
 async function saveClient(req:express.Request,res:express.Response){
  const input=clientSchema.parse(req.body);const id=req.params.id?z.uuid().parse(req.params.id):null;
  if(!id&&!demo&&(!input.token||!input.app_secret))return res.status(400).json({error:'Token e App Secret são obrigatórios.'});
@@ -110,7 +118,7 @@ async function saveClient(req:express.Request,res:express.Response){
  const portal=opaqueToken();
  const row=await transaction(async db=>{
   if(id){const [existing]=(await db.query('select id from app.clients where id=$1 for update',[id])).rows;if(!existing)throw new Error('Cliente não encontrado.');await db.query('select app.ensure_usage($1)',[id]);}
-  const fields=['name','email','photo_url','waba_id','phone_id','group_id','throughput','plan_name','monthly_limit','monthly_fee','overage_mode','overage_rate','cost_rate','due_day','active','allow_template_selection','default_template_name','default_template_language'];
+  const fields=['name','email','photo_url','waba_id','phone_id','group_id','throughput','plan_name','monthly_limit','monthly_fee','overage_mode','overage_rate','cost_rate','due_day','late_interest_rate','late_interest_basis','active','allow_template_selection','default_template_name','default_template_language'];
   const values=fields.map(f=>(input as any)[f]);
   if(!id||input.token){fields.push('token_enc');values.push(demo?'demo':encrypt(input.token!));}
   if(!id||input.app_secret){fields.push('secret_enc');values.push(demo?'demo':encrypt(input.app_secret!));}
@@ -127,7 +135,7 @@ const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*102
 const importLimit=rateLimit({windowMs:60000,limit:8,message:{error:'Aguarde um minuto antes de importar novamente.'}});
 app.post('/api/import',importLimit,upload.single('file'),async(req,res)=>{if(!req.file||!req.file.originalname.toLowerCase().endsWith('.xlsx'))return res.status(400).json({error:'Selecione um arquivo .xlsx.'});const overrideSchema=z.record(z.string(),z.object({headerRow:z.number().int().min(1).max(50000).optional(),phoneColumn:z.string().max(200).optional()}));const overrides=overrideSchema.parse(JSON.parse(req.body.overrides||'{}'));res.json(await parseWorkbook(req.file.buffer,overrides));});
 const recipientSchema=z.object({phone:z.string().max(30),variables:z.array(z.string().min(1).max(1024)).max(30)});
-const campaignSchema=z.object({client_id:z.uuid(),name:z.string().trim().max(180).default(''),template_name:z.string().regex(/^[a-z0-9_]+$/),language:z.string().max(20),scheduled_at:z.iso.datetime(),consent_confirmed:z.literal(true),request_key:z.uuid(),recipients:z.array(recipientSchema).min(1).max(50000)});
+const campaignSchema=z.object({client_id:z.uuid(),name:z.string().trim().max(180).default(''),template_name:z.string().regex(/^[a-z0-9_]+$/),language:z.string().max(20),scheduled_at:z.iso.datetime(),consent_confirmed:z.boolean().optional(),request_key:z.uuid(),recipients:z.array(recipientSchema).min(1).max(50000)});
 app.post('/api/campaigns',async(req,res)=>{
  if(res.locals.clientId)return res.status(403).json({error:'Solicite os disparos pela importação de planilha.'});
  const input=campaignSchema.parse(req.body);if(res.locals.clientId&&res.locals.clientId!==input.client_id)return res.sendStatus(403);
@@ -142,7 +150,7 @@ app.post('/api/campaigns',async(req,res)=>{
   const [existing]=(await db.query('select id,client_id from app.campaigns where request_key=$1',[input.request_key])).rows;
   if(existing){if(existing.client_id!==input.client_id)throw new Error('Identificador de solicitação em uso.');return existing;}
   const campaignName=res.locals.clientId?await nextPortalCampaignName(db,locked,input.scheduled_at):input.name;
-  const [p]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source) values($1,$2,$3,$4,$5,true,$6,$7,$8) returning id`,[input.client_id,campaignName,input.template_name,input.language,input.scheduled_at,input.request_key,res.locals.clientId?'pending':'running',res.locals.clientId?'portal':'admin'])).rows;
+  const [p]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source) values($1,$2,$3,$4,$5,false,$6,$7,$8) returning id`,[input.client_id,campaignName,input.template_name,input.language,input.scheduled_at,input.request_key,res.locals.clientId?'pending':'running',res.locals.clientId?'portal':'admin'])).rows;
   await db.query(`insert into app.messages(campaign_id,client_id,phone,variables) select $1,$2,r.phone,r.variables from jsonb_to_recordset($3::jsonb) as r(phone text,variables jsonb)`,[p.id,input.client_id,JSON.stringify(recipients)]);
   await db.query(`insert into app.audit(actor,action,target_id) values($1,'campaign.create',$2)`,[res.locals.actor,p.id]);return p;
  });res.json(campaign);
@@ -170,12 +178,12 @@ app.get('/api/finance/email-settings',admin,async(_req,res)=>res.json(await quer
 app.get('/api/finance/email-settings/:id',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);
  const result=await transaction(async db=>{
-  const [client]=(await db.query('select id,name,email,plan_name,monthly_limit,monthly_fee,overage_rate,due_day from app.clients where id=$1',[id])).rows;
+  const [client]=(await db.query('select id,name,email,plan_name,monthly_limit,monthly_fee,overage_rate,due_day,late_interest_rate,late_interest_basis from app.clients where id=$1',[id])).rows;
   if(!client)return null;
   const profile=await ensureBillingProfile(db,id);
   const [sample]=(await db.query(`select app.current_period() as period,coalesce(u.accepted,0) as accepted,coalesce(u.monthly_limit,c.monthly_limit) as monthly_limit,coalesce(u.monthly_fee,c.monthly_fee) as base_amount,greatest(0,coalesce(u.accepted,0)-coalesce(u.monthly_limit,c.monthly_limit)) as overage_count,round(greatest(0,coalesce(u.accepted,0)-coalesce(u.monthly_limit,c.monthly_limit))*coalesce(u.overage_rate,c.overage_rate),2) as overage_amount,(app.current_period()+interval '1 month')::date+c.due_day-1 as due_date from app.clients c left join app.usage u on u.client_id=c.id and u.period=app.current_period() where c.id=$1`,[id])).rows;
   sample.total=Number(sample.base_amount)+Number(sample.overage_amount);
-  return {profile,client,variables:billingValues(client,sample,profile.payment_instructions)};
+  return {profile,client,variables:billingValues(client,{...sample,late_interest_rate:client.late_interest_rate,late_interest_basis:client.late_interest_basis},profile.payment_instructions)};
  });
  if(!result)return res.status(404).json({error:'Cliente não encontrado.'});res.json(result);
 });
@@ -201,12 +209,13 @@ app.get('/api/finance/:id/report',admin,async(req,res)=>{
  const report=await transaction(db=>ensureInvoiceReport(db,id));
  res.type('application/pdf').set('Content-Disposition',`inline; filename="relatorio-mensal-${String(report.snapshot.period).slice(0,7)}.pdf"`).set('Cache-Control','no-store').send(Buffer.from(report.pdf_base64,'base64'));
 });
-app.get('/api/finance',admin,async(_req,res)=>res.json(await query(`select i.*,c.name as client_name,c.email,o.status as email_status,o.last_error,(o.first_attempt_at is null) as email_not_attempted from app.invoices i join app.clients c on c.id=i.client_id left join app.outbox o on o.kind='invoice' and o.reference_id=i.id order by i.period desc,c.name limit 250`)));
-app.post('/api/finance/:id/paid',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);await transaction(async db=>{await db.query(`update app.invoices set status='paid',paid_at=now() where id=$1`,[id]);await db.query(`insert into app.audit(actor,action,target_id) values($1,'invoice.paid',$2)`,[res.locals.actor,id]);});res.json({ok:true});});
+app.get('/api/finance',admin,async(_req,res)=>res.json(await query(`select i.*,b.overdue_days,b.interest_amount,coalesce(i.paid_total,b.amount_due) as amount_due,c.name as client_name,c.email,o.status as email_status,o.last_error,(o.first_attempt_at is null) as email_not_attempted from app.invoices i cross join lateral app.invoice_balance(i.total,i.due_date,i.late_interest_rate,i.late_interest_basis,coalesce(i.paid_at,now())) b join app.clients c on c.id=i.client_id left join app.outbox o on o.kind='invoice' and o.reference_id=i.id order by i.period desc,c.name limit 250`)));
+app.post('/api/finance/:id/paid',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);await transaction(async db=>{await db.query(`update app.invoices i set status='paid',paid_at=now(),paid_total=(select amount_due from app.invoice_balance(i.total,i.due_date,i.late_interest_rate,i.late_interest_basis,now())) where id=$1 and status='open'`,[id]);await db.query(`insert into app.audit(actor,action,target_id) values($1,'invoice.paid',$2)`,[res.locals.actor,id]);});res.json({ok:true});});
 app.get('/api/settings',admin,async(_req,res)=>res.json({url:config.url,webhookPattern:`${config.url}/api/webhook/ID_DO_CLIENTE`,integrations:[{name:'Supabase',description:'Banco de dados e acesso administrativo',configured:!demo&&!!config.database},{name:'WhatsApp Cloud API',description:'Credenciais individuais no cadastro de cada cliente',configured:!demo&&!!config.graph},{name:'Resend',description:'E-mails automáticos de cobrança',configured:!demo&&!!(config.resend&&config.from)},{name:'Evolution',description:'Avisos de conclusão nos grupos dos clientes',configured:!demo&&!!(config.evolution&&config.evolutionKey&&config.evolutionInstance)}],notifications:await query('select id,kind,status,last_error,attempts from app.outbox where status<>\'sent\' order by next_attempt_at desc limit 30')}));
 app.use('/api',(_req,res)=>res.status(404).json({error:'Rota não encontrada.'}));
 app.use(express.static(resolve('dist')));app.get('/{*path}',(_req,res)=>res.sendFile(resolve('dist/index.html')));
 app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{
+ res.locals.operationError=error;res.locals.errorLocation=error instanceof Error?error.stack?.split('\n').slice(1,5).join('\n'):'';
  if(error instanceof z.ZodError)return res.status(400).json({error:error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')});
  if(error?.code==='23505')return res.status(409).json({error:'Registro duplicado. Verifique o Phone ID ou a solicitação.'});
  if(error?.code==='LIMIT_FILE_SIZE')return res.status(400).json({error:'O arquivo deve ter até 10 MB.'});

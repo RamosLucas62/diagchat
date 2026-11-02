@@ -21,8 +21,9 @@ export async function queueInvoiceEmail(db:DB,invoiceId:string,automatic:boolean
   return {id:existing.id,status:existing.status};
  }
  const [client]=(await db.query('select name,email,plan_name from app.clients where id=$1',[invoice.client_id])).rows;
+ const [balance]=(await db.query('select * from app.invoice_balance($1,$2,$3,$4,now())',[invoice.total,invoice.due_date,invoice.late_interest_rate,invoice.late_interest_basis])).rows;
  const [usage]=(await db.query('select accepted,monthly_limit from app.usage where client_id=$1 and period=$2',[invoice.client_id,invoice.period])).rows;
- const variables=billingValues(client,{...usage,...invoice},profile.payment_instructions);
+ const variables=billingValues(client,{...usage,...invoice,...balance},profile.payment_instructions);
  const report=await ensureInvoiceReport(db,invoice.id);
  const payload={attachments:[reportAttachment(report)],to:[client.email],subject:renderBillingTemplate(profile.subject_template,variables).replace(/[\r\n]+/g,' '),text:renderBillingTemplate(profile.body_template,variables)};
  const [item]=(await db.query("insert into app.outbox(kind,reference_id,payload,automatic) values('invoice',$1,$2,$3) returning id,status",[invoice.id,JSON.stringify(payload),automatic])).rows;

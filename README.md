@@ -11,7 +11,7 @@ npm ci
 npm run demo
 ```
 
-Abra http://127.0.0.1:5173. A demonstração usa PostgreSQL em memória via PGlite, com registros fictícios. Cadastro, importação, solicitações, aprovações e financeiro funcionam nesse banco temporário. Não inicia o worker, não chama Meta, Resend ou Evolution, e não aceita segredos reais. Reiniciar o servidor restaura os exemplos. `DEMO_MODE=true` é recusado em produção.
+Abra http://127.0.0.1:5173. A demonstração usa PostgreSQL em memória via PGlite, com registros fictícios. Cadastro, importação, solicitações e financeiro funcionam nesse banco temporário. Não inicia o worker, não chama Meta, Resend ou Evolution, e não aceita segredos reais. Reiniciar o servidor restaura os exemplos. `DEMO_MODE=true` é recusado em produção.
 
 Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas abas, cabeçalho na linha 8, duplicata e telefone inválido). Nunca use esses contatos de teste em envios reais.
 
@@ -22,7 +22,7 @@ Planilha fictícia para experimentar: `public/exemplo-importacao.xlsx` (duas aba
 - Webhook `APP_URL/api/webhook/:clientId`, com verificação GET e HMAC SHA-256 sobre o corpo bruto no POST; filtro de WABA e Phone ID; caixa de entrada durável e deduplicada.
 - Portal no endereço `APP_URL/nome_do_cliente`, com slug estável e único; o link compartilhado contém uma chave no fragmento, removida da barra após abrir. Solicitações recebem nome automático `Cliente | DD.MM.AA | NN` por data agendada de São Paulo; escolha de template opcional por cliente e padrão definido pela equipe. Portal com token aleatório de 256 bits no fragmento do link; só o hash fica no banco. Token enviado ao servidor por cabeçalho, sem exposição em logs de URL. Rotação revoga o link anterior. Portal sem credenciais Meta ou dados de outros clientes.
 - Importação automática de XLSX por perfil do cliente: cabeçalho até a linha 500, reconhecimento automático de telefone e variáveis pelo contexto de cada template, texto fixo e formatação, roteamento por coluna ou escolha no formulário, datas por aba/coluna e agrupamento de procedimentos. O cliente não faz associações de colunas; ambiguidades ficam na revisão administrativa. Guia: [docs/IMPORTACAO.md](docs/IMPORTACAO.md).
-- Lotes independentes por aba, template e data. Importações são reprocessadas no servidor e criadas de forma atômica e idempotente. Portal solicita e administrador aprova; administrador pode pausar, retomar e cancelar pendentes.
+- Lotes independentes por aba, template e data. Importações são reprocessadas no servidor e criadas de forma atômica e idempotente. Planilhas válidas entram direto na fila ao enviar o formulário, sem checkbox ou aprovação manual. O administrador pode pausar, retomar e cancelar campanhas.
 - Templates aprovados da Meta com variáveis posicionais de texto no corpo. Componentes dinâmicos de mídia, cabeçalho, URL, Flow e código de oferta não são suportados nesta versão.
 - Fila PostgreSQL com reserva de cota atômica e espaçamento por cliente, inclusive com múltiplos workers. Throughput cadastrado é teto, não garantia de capacidade: o volume real depende de latência, concorrência, VPS e limites Meta.
 - Aceite conta uma vez; rejeição explícita antes do aceite libera reserva; timeout/HTTP 5xx vira envio incerto sem reenvio automático. Webhook pode reconciliar a resposta tardia.
@@ -80,3 +80,11 @@ Testes cobrem importação, criptografia, assinatura, reserva de franquia, idemp
 - Respostas incertas não são reenviadas automaticamente. Consulte o guia operacional antes de reconciliar manualmente.
 - Resend envia a cobrança; emissão fiscal, boleto, PIX automático e baixa bancária dependem de um gateway ainda não definido.
 - Templates são consultados em até 100 registros na primeira versão. Consulte o guia para paginação e formatos futuros.
+
+## Pós-pago, juros e histórico de erros
+
+O consumo de cada competência é fechado e cobrado no mês seguinte, no dia de vencimento do cliente. Em **Clientes → Plano & cobrança**, configure juros simples por atraso: percentual por dia ou percentual mensal proporcional aos dias, com base de 30 dias. Zero desativa juros. A taxa fica congelada na emissão de cada fatura; alterar o cliente vale para faturas futuras e não muda faturas antigas. Não há multa fixa nem juros compostos. O painel mostra principal, dias de atraso, juros e total atualizado. Marcar como pago congela o total e a data; repetir a ação não altera o pagamento. Faturas existentes começam sem juros. O PDF mensal preserva os dados e o total original da competência; e-mails usam o saldo atualizado no momento de entrar na fila, mantendo o conteúdo estável nas tentativas de reenvio.
+
+**Histórico de erros** é exclusivo da equipe: descrição, horário de São Paulo, origem, operação e referências de cliente/campanha quando disponíveis. Filtre por origem e situação e marque como resolvido após corrigir a causa. Registra falhas HTTP, importações com pendências, Meta, worker, Resend, Evolution e eventos da interface. Credenciais são ocultadas; planilhas e corpos completos das requisições não são incluídos. Se o banco estiver indisponível, há fallback estruturado nos logs do serviço. Não envia avisos externos.
+
+Reimplante **web e worker** no EasyPanel para aplicar esta versão. A migração `007_operations_and_interest.sql` é automática na inicialização, sem novas variáveis de ambiente. O worker continua necessário para disparos e fechamento mensal. Campanhas antigas pendentes não são liberadas automaticamente pela atualização.

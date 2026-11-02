@@ -3,7 +3,7 @@ import {Resvg} from '@resvg/resvg-js';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import type {DB} from './db.js';
-export type ReportSnapshot={invoiceId:string;clientId:string;clientName:string;period:string;planName:string;accepted:number;monthlyLimit:number;overageCount:number;overageRate:string;baseAmount:string;overageAmount:string;total:string;dueDate:string;delivered:number;read:number;failed:number;daily:{day:number;sent:number}[];generatedAt:string};
+export type ReportSnapshot={lateInterestRate?:string;lateInterestBasis?:string;invoiceId:string;clientId:string;clientName:string;period:string;planName:string;accepted:number;monthlyLimit:number;overageCount:number;overageRate:string;baseAmount:string;overageAmount:string;total:string;dueDate:string;delivered:number;read:number;failed:number;daily:{day:number;sent:number}[];generatedAt:string};
 const fontPath=resolve('assets/fonts/Manrope.ttf');
 const money=(n:string|number)=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(n));
 const count=(n:number)=>new Intl.NumberFormat('pt-BR').format(n);
@@ -38,9 +38,10 @@ export async function generateMonthlyPDF(s:ReportSnapshot):Promise<Buffer>{
  row('Mensagens excedentes',money(s.overageAmount),576);
  const tariff=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:2,maximumFractionDigits:4}).format(Number(s.overageRate));
  text(`${count(s.overageCount)} adicionais x ${tariff} por mensagem`,58,598,8,'#73877f');
- doc.roundedRect(42,647,511,61,10).fill('#e9f5e2');text('TOTAL DA COBRANÇA',58,669,9,'#3f6235');text(money(s.total),344,659,23,'#264b20',{width:192,align:'right'});
+ doc.roundedRect(42,647,511,61,10).fill('#e9f5e2');text('TOTAL ORIGINAL · SEM JUROS',58,669,9,'#3f6235');text(money(s.total),344,659,23,'#264b20',{width:192,align:'right'});
  text(`Vencimento: ${new Date(s.dueDate).toLocaleDateString('pt-BR',{timeZone:'UTC'})}`,42,726,10,'#566e63');
- text('Resumo de consumo e cobrança. Não substitui nota fiscal ou boleto.',42,754,8,'#73877f');
+ text(Number(s.lateInterestRate)>0?`Após o vencimento: juros simples de ${new Intl.NumberFormat('pt-BR',{maximumFractionDigits:4}).format(Number(s.lateInterestRate))}% ${s.lateInterestBasis==='daily'?'ao dia':'ao mês, proporcionais aos dias (base 30)'}.`:'Cobrança pós-paga. Encargos de atraso, quando aplicáveis, constam no painel atualizado.',42,746,8,'#73877f',{width:511});
+ text('Resumo de consumo e cobrança. Não substitui nota fiscal ou boleto.',42,764,8,'#73877f');
  text(`Referência: ${s.invoiceId}`,42,787,7,'#73877f',{width:430});text('1 / 1',509,787,7,'#73877f',{width:44,align:'right'});
  doc.end();return completed;
 }
@@ -53,7 +54,7 @@ export async function ensureInvoiceReport(db:DB,invoiceId:string){
  const [delivery]=(await db.query(`select count(*) filter(where delivery in ('delivered','read'))::int as delivered,count(*) filter(where delivery='read')::int as read,count(*) filter(where state='failed' or delivery='failed')::int as failed from app.messages where client_id=$1 and period=$2`,[invoice.client_id,invoice.period])).rows;
  const daily=(await db.query(`select extract(day from greatest($2::date,least(($2::date+interval '1 month'-interval '1 day')::date,(accepted_at at time zone 'America/Sao_Paulo')::date)))::int as day,count(*)::int as sent from app.messages where client_id=$1 and period=$2 and state='accepted' group by day order by day`,[invoice.client_id,invoice.period])).rows;
  const period=new Date(invoice.period).toISOString().slice(0,10);
- const snapshot:ReportSnapshot={invoiceId:invoice.id,clientId:invoice.client_id,clientName:client.name,period,planName:invoice.plan_name||usage.plan_name||client.plan_name,accepted:usage.accepted,monthlyLimit:usage.monthly_limit,overageCount:invoice.overage_count,overageRate:String(usage.overage_rate),baseAmount:String(invoice.base_amount),overageAmount:String(invoice.overage_amount),total:String(invoice.total),dueDate:new Date(invoice.due_date).toISOString(),...delivery,daily,generatedAt:new Date().toISOString()};
+ const snapshot:ReportSnapshot={lateInterestRate:String(invoice.late_interest_rate),lateInterestBasis:invoice.late_interest_basis,invoiceId:invoice.id,clientId:invoice.client_id,clientName:client.name,period,planName:invoice.plan_name||usage.plan_name||client.plan_name,accepted:usage.accepted,monthlyLimit:usage.monthly_limit,overageCount:invoice.overage_count,overageRate:String(usage.overage_rate),baseAmount:String(invoice.base_amount),overageAmount:String(invoice.overage_amount),total:String(invoice.total),dueDate:new Date(invoice.due_date).toISOString(),...delivery,daily,generatedAt:new Date().toISOString()};
  const pdf=await generateMonthlyPDF(snapshot);if(pdf.length>2000000)throw new Error('O relatório ultrapassou o limite permitido.');
  const [saved]=(await db.query('insert into app.invoice_reports(invoice_id,snapshot,pdf_base64,sha256) values($1,$2,$3,$4) returning *',[invoice.id,JSON.stringify(snapshot),pdf.toString('base64'),createHash('sha256').update(pdf).digest('hex')])).rows;return saved;
 }

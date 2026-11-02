@@ -38,3 +38,16 @@ test('cadastro abre a etapa 4 sem fechar, não duplica o cliente ao voltar e só
   assert.deepEqual(profileSave.body.config.templates,[automaticTemplate(templates[0])]);
  }finally{await act(async()=>{tree?.unmount();});globalThis.fetch=originalFetch;}
 });
+
+test('solicitar disparo dispensa checkbox e envia o formulário diretamente para a fila',async()=>{
+ Object.assign(globalThis,{IS_REACT_ACT_ENVIRONMENT:true,location:{pathname:'/',hash:''},document:{body:{style:{overflow:''}}},window:{confirm:()=>true}});
+ const {CampaignForm}=await import('../src/CampaignForm.js');let completed=false;let submitted:any;const originalFetch=globalThis.fetch;
+ globalThis.fetch=async(input,options)=>{const path=String(input);if(path.endsWith('/import-options'))return Response.json({mode:'fixed',templates:[]});if(path==='/api/import-batches')return Response.json({id:'batch',status:'ready',issues:[],summary:{rows:1,messages:1,sheets:1,duplicates:0,groups:0,segments:[]}});if(path.endsWith('/submit')){submitted=JSON.parse(String(options?.body));return Response.json({status:'submitted'});}throw new Error('Unexpected '+path);};
+ let tree:ReactTestRenderer;try{
+  await act(async()=>{tree=create(React.createElement(CampaignForm,{clients:[{id:'client'}] as any,portal:true,onClose:()=>{},onSaved:review=>{assert.equal(review,false);completed=true;}}));});
+  await act(async()=>{tree.root.findByType('input').props.onChange({target:{files:[new File(['xlsx'],'lista.xlsx')],value:''}});});
+  assert.equal(tree!.root.findAllByType('input').some(i=>i.props.type==='checkbox'),false);
+  const submit=tree!.root.findAllByType('button').find(b=>b.children.join('').includes('Iniciar disparo'))!;assert.equal(submit.props.disabled,false);
+  await act(async()=>{await submit.props.onClick();});assert.equal(completed,true);assert.deepEqual(submitted,{});
+ }finally{await act(async()=>tree?.unmount());globalThis.fetch=originalFetch;}
+});

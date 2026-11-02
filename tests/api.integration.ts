@@ -34,7 +34,13 @@ try{
  const openProfile=(await call(`/finance/email-settings/${openInvoice.client_id}`)).data.profile;await call(`/finance/email-settings/${openInvoice.client_id}`,'PUT',{...openProfile,auto_send:false});
  // An explicit manual request is not cancelled by the automatic-mail preference.
  assert.equal((await call('/finance')).data.find((i:any)=>i.id===openInvoice.id).email_status,'pending');
+ // Error history is restricted to the team and supports resolving an event.
+ assert.equal((await call('/error-logs','GET',undefined,token)).status,403);
+ const browserEvent=await call('/error-events','POST',{operation:'Teste de interface',message:'Falha de teste sem dados pessoais'},token);assert.equal(browserEvent.status,200);
+ const events=(await call('/error-logs?source=browser&status=open')).data;const browserLog=events.find((e:any)=>e.message==='Falha de teste sem dados pessoais');assert(browserLog);assert(browserLog.occurred_at);assert.equal(browserLog.client_id,cid);assert.equal((await call(`/error-logs/${browserLog.id}/resolve`,'POST',{},token)).status,403);assert.equal((await call(`/error-logs/${browserLog.id}/resolve`,'POST')).status,200);assert((await call('/error-logs?source=browser&status=resolved')).data.some((e:any)=>e.id===browserLog.id));
+ // Payment confirmation is idempotent and freezes the amount and timestamp.
+ assert.equal((await call(`/finance/${openInvoice.id}/paid`,'POST')).status,200);const paid=(await call('/finance')).data.find((i:any)=>i.id===openInvoice.id);assert.equal(paid.status,'paid');assert.equal(Number(paid.paid_total),Number(paid.amount_due));assert.equal((await call(`/finance/${openInvoice.id}/paid`,'POST')).status,200);const paidAgain=(await call('/finance')).data.find((i:any)=>i.id===openInvoice.id);assert.equal(paidAgain.paid_at,paid.paid_at);assert.equal(paidAgain.amount_due,paid.amount_due);
  const rotated=await call(`/clients/${cid}/portal`,'POST');assert.equal(rotated.status,200);assert.equal((await call('/clients','GET',undefined,token)).status,401);
  const wrongOrigin=await fetch(base+'/api/logout',{method:'POST',headers:{Origin:'https://untrusted.example'}});assert.equal(wrongOrigin.status,403);
- console.log('Integração HTTP: cadastro, portal isolado, importação, campanha, idempotência, aprovação, rotação de link, modelos financeiros por cliente, controle de versão, envio manual e origem validados.');
+ console.log('Integração HTTP com histórico de erros privado e pagamento idempotente: cadastro, portal isolado, importação, campanha, idempotência, aprovação, rotação de link, modelos financeiros por cliente, controle de versão, envio manual e origem validados.');
 }finally{child.kill('SIGTERM');}

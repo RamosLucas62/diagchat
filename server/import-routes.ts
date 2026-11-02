@@ -1,3 +1,4 @@
+import {recordError} from './error-log.js';
 import {automaticTemplate} from '../shared/import-semantics.js';
 import {Router,type Response} from 'express';
 import multer from 'multer';
@@ -46,7 +47,7 @@ router.post('/import-batches',limiter,capacity,upload.single('file'),async(req,r
  const [existing]=await query('select * from app.import_batches where client_id=$1 and request_key=$2 and expires_at>now()',[clientId,requestKey]);if(existing)return res.json(publicBatch(existing));
  const client=await clientFor(clientId);if(!client?.active)return res.status(400).json({error:'Cliente indisponível.'});const available=await templates(client);const profile=await loadProfile(client,available);const chosen=z.string().max(550).parse(req.body.chosen_template||'');
  const result=await buildImportPlan(req.file.buffer,profile.config,available,{chosenTemplate:chosen});
- const [batch]=await query(`insert into app.import_batches(client_id,request_key,file_name,file_base64,chosen_template,profile_version,status,result) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(client_id,request_key) do update set request_key=excluded.request_key returning *`,[clientId,requestKey,req.file.originalname.slice(0,200),req.file.buffer.toString('base64'),chosen,profile.version,result.issues.length?'review':'ready',JSON.stringify(result)]);res.json(publicBatch(batch));
+ const [batch]=await query(`insert into app.import_batches(client_id,request_key,file_name,file_base64,chosen_template,profile_version,status,result) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(client_id,request_key) do update set request_key=excluded.request_key returning *`,[clientId,requestKey,req.file.originalname.slice(0,200),req.file.buffer.toString('base64'),chosen,profile.version,result.issues.length?'review':'ready',JSON.stringify(result)]);if(result.issues.length)await recordError({source:'import',operation:'Ler planilha',code:'IMPORT_REVIEW',error:`${result.issues.length} pendência(s) na importação.`,details:result.issues.slice(0,10).map(i=>`${i.sheet} · linha ${i.row}: ${i.message}`).join('\n'),clientId});res.json(publicBatch(batch));
 });
 router.get('/import-batches',async(_req,res)=>{const rows=await query(`select b.id,b.client_id,c.name as client_name,b.file_name,b.status,b.result,b.requested_at,b.created_at,b.campaign_ids from app.import_batches b join app.clients c on c.id=b.client_id where b.expires_at>now() and b.requested_at is not null ${res.locals.clientId?'and b.client_id=$1':''} order by b.created_at desc limit 100`,res.locals.clientId?[res.locals.clientId]:[]);res.json(rows.map(publicBatch));});
 router.get('/import-batches/:id',admin,async(req,res)=>{const [batch]=await query('select * from app.import_batches where id=$1 and expires_at>now()',[z.uuid().parse(req.params.id)]);if(!batch)return res.sendStatus(404);res.json({...publicBatch(batch),sheets:batch.result.sheets,overrides:batch.overrides,ignored_rows:batch.ignored_rows,profile_version:batch.profile_version});});
@@ -63,10 +64,10 @@ router.post('/import-batches/:id/reprocess',admin,capacity,async(req,res)=>{
  if(!saved)return res.status(409).json({error:'A importação ou o perfil mudou. Atualize os dados.'});res.json(publicBatch(saved));
 });
 router.post('/import-batches/:id/submit',capacity,async(req,res)=>{
- const id=z.uuid().parse(req.params.id);z.object({consent:z.literal(true)}).parse(req.body);
+ const id=z.uuid().parse(req.params.id);z.object({}).parse(req.body||{});
  const [batch]=await query('select * from app.import_batches where id=$1 and expires_at>now()',[id]);if(!batch)return res.sendStatus(404);if(!allowed(res,batch.client_id))return res.sendStatus(403);if(batch.status==='submitted')return res.json(publicBatch(batch));
  const client=await clientFor(batch.client_id);if(!client?.active)return res.status(400).json({error:'Cliente indisponível.'});
- if(batch.status==='review'){const [requested]=await query("update app.import_batches set requested_at=coalesce(requested_at,now()),consent_at=coalesce(consent_at,now()) where id=$1 and status='review' returning *",[id]);if(!requested)return res.status(409).json({error:'A importação mudou. Atualize os dados.'});return res.json(publicBatch(requested));}
+ if(batch.status==='review'){const [requested]=await query("update app.import_batches set requested_at=coalesce(requested_at,now()) where id=$1 and status='review' returning *",[id]);if(!requested)return res.status(409).json({error:'A importação mudou. Atualize os dados.'});return res.json(publicBatch(requested));}
  const available=await templates(client),profile=await loadProfile(client,available);
  // Recalculate from the stored workbook; browser-supplied recipients and mappings are never used.
  const plan=await buildImportPlan(Buffer.from(batch.file_base64,'base64'),profile.config,available,{chosenTemplate:batch.chosen_template,overrides:batch.overrides,ignoredRows:batch.ignored_rows});
@@ -75,14 +76,14 @@ router.post('/import-batches/:id/submit',capacity,async(req,res)=>{
   const [locked]=(await db.query('select * from app.clients where id=$1 and active for update',[batch.client_id])).rows;if(!locked)throw new Error('Cliente indisponível.');if(locked.waba_id!==client.waba_id||locked.phone_id!==client.phone_id||locked.token_enc!==client.token_enc)return null;
   const [currentProfile]=(await db.query('select version from app.import_profiles where client_id=$1',[batch.client_id])).rows;if((currentProfile?.version||0)!==profile.version)return null;
   const [current]=(await db.query('select * from app.import_batches where id=$1 for update',[id])).rows;if(current.status==='submitted')return current;if(current.revision!==batch.revision)return null;
-  // Admin approval of the campaign remains separate from import validation.
+  // A valid submission starts automatically; scheduled campaigns wait for their due time.
   const ids:string[]=[];
   if(!plan.issues.length)for(const [index,segment] of plan.segments.entries()){
    const scheduledAt=segment.immediate?new Date().toISOString():segment.scheduledAt;const name=await nextPortalCampaignName(db,locked,scheduledAt);const split=segment.template.lastIndexOf(':');const template=segment.template.slice(0,split),language=segment.template.slice(split+1);
-   const [campaign]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source,import_batch_id,import_segment,import_template_signature) values($1,$2,$3,$4,$5,true,gen_random_uuid(),'pending',$6,$7,$8,$9) returning id`,[batch.client_id,name,template,language,scheduledAt,res.locals.clientId?'portal':'admin',id,String(index),templateSignature(available.find(t=>`${t.name}:${t.language}`===segment.template)!)])).rows;
+   const [campaign]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source,import_batch_id,import_segment,import_template_signature) values($1,$2,$3,$4,$5,false,gen_random_uuid(),'running',$6,$7,$8,$9) returning id`,[batch.client_id,name,template,language,scheduledAt,res.locals.clientId?'portal':'admin',id,String(index),templateSignature(available.find(t=>`${t.name}:${t.language}`===segment.template)!)])).rows;
    await db.query(`insert into app.messages(campaign_id,client_id,phone,variables,source_rows) select $1,$2,r.phone,r.variables,r."sourceRows" from jsonb_to_recordset($3::jsonb) as r(phone text,variables jsonb,"sourceRows" jsonb)`,[campaign.id,batch.client_id,JSON.stringify(segment.recipients)]);ids.push(campaign.id);
   }
-  const [saved]=(await db.query("update app.import_batches set requested_at=coalesce(requested_at,now()),consent_at=coalesce(consent_at,now()),profile_version=$2,result=$3,status=$4,campaign_ids=$5 where id=$1 returning *",[id,profile.version,JSON.stringify(plan),plan.issues.length?'review':'submitted',JSON.stringify(ids)])).rows;
+  const [saved]=(await db.query("update app.import_batches set requested_at=coalesce(requested_at,now()),profile_version=$2,result=$3,status=$4,campaign_ids=$5 where id=$1 returning *",[id,profile.version,JSON.stringify(plan),plan.issues.length?'review':'submitted',JSON.stringify(ids)])).rows;
   await db.query("insert into app.audit(actor,action,target_id) values($1,'import.submit',$2)",[res.locals.actor,id]);return saved;
  });if(!result)return res.status(409).json({error:'A importação ou o perfil mudou durante o processamento. Atualize e tente novamente.'});res.json(publicBatch(result));
 });
