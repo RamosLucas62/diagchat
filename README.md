@@ -129,3 +129,9 @@ Rotas administrativas:
 - `GET /api/finance/:id/asaas-documents/boleto` e `/nf` — PDFs privados, somente para administradores.
 
 As rotas financeiras não são acessíveis pelos links do portal do cliente. Testes locais simulam o Asaas e o Resend; valide a configuração fiscal e os documentos no Sandbox antes de ativar cobranças reais.
+
+### Falhas de linhas na importação
+
+Telefones inválidos e horários ausentes ou inválidos não colocam a solicitação em revisão: os contatos válidos entram na fila e as outras linhas são contadas como falhas. Em **Disparos → campanha → Falhas da planilha**, equipe e cliente podem consultar aba, linha original, motivo e horário do registro, com rolagem e paginação. Esses registros permanecem após a expiração do XLSX e não consomem franquia. Também entram nas métricas, no relatório consolidado do grupo e no resumo mensal. Problemas de configuração ou associações ambíguas continuam em revisão. Solicitações antigas podem ser revalidadas pelo botão **Revalidar e iniciar**.
+
+Esta atualização exige a migração `011_import_failures.sql` antes de executar a nova versão do web e do worker; o início do serviço aplica as migrações pendentes.

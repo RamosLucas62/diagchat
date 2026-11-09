@@ -1,3 +1,4 @@
+import {campaignImportFailures} from './import-failures.js';
 import {asaasRouter,asaasWebhook} from './asaas-routes.js';
 import {listCampaigns,campaignAction} from './campaigns.js';
 import {recordError,requestErrorLog,safeErrorText} from './error-log.js';
@@ -168,6 +169,7 @@ app.post('/api/campaigns/:id/action',admin,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);const {action}=z.object({action:z.enum(['approve','pause','resume','cancel'])}).parse(req.body);
  if(!await campaignAction(id,action,res.locals.actor))return res.sendStatus(404);res.json({ok:true});
 });
+app.get('/api/campaigns/:id/import-failures',async(req,res)=>{const id=z.uuid().parse(req.params.id);const offset=z.coerce.number().int().min(0).max(100000).default(0).parse(req.query.offset);const result=await campaignImportFailures(id,res.locals.clientId,offset);if(!result)return res.sendStatus(404);res.json(result);});
 app.get('/api/analytics',async(req,res)=>{const filter=parseAnalyticsFilter(req.query,res.locals.clientId);if(!filter)return res.status(403).json({error:'Cliente não autorizado.'});res.json(await analytics(filter,!!res.locals.clientId));});
 app.get('/api/metrics',async(req,res)=>{
  const days=z.coerce.number().int().min(1).max(90).catch(30).parse(req.query.days);const cid=res.locals.clientId||null;
@@ -175,6 +177,7 @@ app.get('/api/metrics',async(req,res)=>{
  const [clients]=await query('select count(*)::int as clients from app.clients where active and ($1::uuid is null or id=$1)',[cid]);
  const daily=await query(`select d::date::text as date,count(m.id)::int as sent from generate_series((now() at time zone 'America/Sao_Paulo')::date-($2::int-1),(now() at time zone 'America/Sao_Paulo')::date,interval '1 day') d left join app.messages m on (m.accepted_at at time zone 'America/Sao_Paulo')::date=d::date and ($1::uuid is null or m.client_id=$1) group by d order by d`,[cid,days]);
  const [delivery]=await query(`select count(*) filter(where delivery in ('delivered','read'))::int as delivered,count(*) filter(where delivery='read')::int as read,count(*) filter(where delivery='failed' or state='failed')::int as failed,count(*) filter(where state='unknown')::int as uncertain from app.messages where period=app.current_period() and ($1::uuid is null or client_id=$1)`,[cid]);
+ const [imports]=await query('select count(*)::int as failed from app.import_failures where period=app.current_period() and ($1::uuid is null or client_id=$1)',[cid]);delivery.failed+=imports.failed;
  const [{day}]=await query(`select extract(day from now() at time zone 'America/Sao_Paulo')::int as day`);
  const result={...usage,...clients,...delivery,profit:usage.revenue-usage.cost,average:Math.round(usage.sent/day),daily};
  if(cid){delete result.revenue;delete result.cost;delete result.profit;}res.json(result);

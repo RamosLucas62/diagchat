@@ -22,6 +22,7 @@ export async function analytics(filter:NonNullable<ReturnType<typeof parseAnalyt
  where claimed_at>=($2::date::timestamp at time zone 'America/Sao_Paulo')
  and claimed_at<(($3::date+1)::timestamp at time zone 'America/Sao_Paulo')
  and ($1::uuid is null or client_id=$1)`,args);
+ const [imports]=await query(`select count(*)::int as failed from app.import_failures where created_at>=($2::date::timestamp at time zone 'America/Sao_Paulo') and created_at<(($3::date+1)::timestamp at time zone 'America/Sao_Paulo') and ($1::uuid is null or client_id=$1)`,args);
  const [usage]=await query(`select coalesce(sum(u.reserved),0)::int as reserved,coalesce(sum(u.monthly_limit),0)::int as quota,
  coalesce(sum(round(u.monthly_fee+greatest(0,u.accepted-u.monthly_limit)*u.overage_rate,2)),0)::float as revenue,
  coalesce(sum(u.cost),0)::float as cost from app.usage u
@@ -37,7 +38,7 @@ export async function analytics(filter:NonNullable<ReturnType<typeof parseAnalyt
  select d::date::text as date,coalesce(c.sent,0)::int as sent
  from generate_series($2::date,$3::date,interval '1 day') d left join counts c on c.day=d::date order by d`,args);
  const result={...usage,...clients,sent:messages.sent,delivered:messages.delivered,read:messages.read,
- failed:messages.delivery_failed+attempts.failed,uncertain:attempts.uncertain,
+ failed:messages.delivery_failed+attempts.failed+imports.failed,uncertain:attempts.uncertain,
  average:Math.round(messages.sent/filter.days),profit:usage.revenue-usage.cost,daily};
  if(portal){const {revenue,cost,profit,...safe}=result;return safe;}return result;
 }

@@ -19,8 +19,10 @@ export async function listCampaigns(clientId?:string){
    count(*) filter(where m.delivery in ('delivered','read'))::int as delivered,count(*) filter(where m.delivery='read')::int as read,
    count(*) filter(where m.state='failed' or m.delivery='failed')::int as failed,count(*) filter(where m.state='unknown')::int as uncertain
   from scoped p left join app.messages m on m.campaign_id=p.id group by p.group_id
- ) select g.*,c.name as client_name,t.total,t.sent,t.delivered,t.read,t.failed,t.uncertain from groups g
- join app.clients c on c.id=g.client_id join totals t on t.group_id=g.id order by g.created_at desc,g.id limit 100`,[clientId||null]);
+ ), failures as (
+  select p.group_id,count(f.id)::int as failed from scoped p join app.import_failures f on f.campaign_id=p.id group by p.group_id
+ ) select g.*,c.name as client_name,t.total+coalesce(f.failed,0) as total,t.sent,t.delivered,t.read,t.failed+coalesce(f.failed,0) as failed,coalesce(f.failed,0) as import_failed,t.uncertain from groups g
+ join app.clients c on c.id=g.client_id join totals t on t.group_id=g.id left join failures f on f.group_id=g.id order by g.created_at desc,g.id limit 100`,[clientId||null]);
 }
 export async function campaignAction(id:string,action:'approve'|'pause'|'resume'|'cancel',actor:string){
  const [target]=await query('select client_id,coalesce(report_group_id,import_batch_id,id) as group_id from app.campaigns where id=$1 or coalesce(report_group_id,import_batch_id,id)=$1 limit 1',[id]);if(!target)return false;

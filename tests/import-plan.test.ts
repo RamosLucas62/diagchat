@@ -33,7 +33,7 @@ test('formulário só aceita templates configurados; variáveis vazias e fórmul
  const invalid=await workbook([{name:'Lista',headers,rows:[['Ana',{formula:'1+1',result:5511999991234},'2026-11-05','Exame','A','Consulta'],['Bia','11988881234','','','A','Consulta']]}]);assert.equal((await buildImportPlan(invalid,profile(),templates,{now})).summary.messages,0);
 });
 test('revisão pode excluir linha específica sem liberar valores desconhecidos nas demais',async()=>{
- const bytes=await workbook([{name:'Lista',headers,rows:[ana,['Bia','123','2026-11-05','Exame','A','Consulta']]}]);const first=await buildImportPlan(bytes,profile(),templates,{now});assert.equal(first.issues.length,1);const second=await buildImportPlan(bytes,profile(),templates,{now,ignoredRows:[{sheet:'Lista',row:10}]});assert.equal(second.issues.length,0);assert.equal(second.summary.messages,1);
+ const bytes=await workbook([{name:'Lista',headers,rows:[ana,['Bia','123','2026-11-05','Exame','A','Consulta']]}]);const first=await buildImportPlan(bytes,profile(),templates,{now});assert.equal(first.issues.length,0);assert.equal(first.failures.length,1);const second=await buildImportPlan(bytes,profile(),templates,{now,ignoredRows:[{sheet:'Lista',row:10}]});assert.equal(second.issues.length,0);assert.equal(second.summary.messages,1);
 });
 
 test('o mesmo telefone não junta pessoas de nome completo diferente nem perde datas fora do template',async()=>{
@@ -117,7 +117,21 @@ test('data e horário de colunas da mesma linha combinam texto, datas Excel e fr
 });
 test('combinar colunas exige data e horário válidos e únicos, com seleção explícita para resolver ambiguidade',async()=>{
  const {automaticTemplate}=await import('../shared/import-semantics.js');const t={name:'agenda',language:'pt_BR',supported:true,body:'Olá {{1}}. Data: {{2}}',parameters:['1','2']};const p=defaultImportProfile();p.fixedTemplate='agenda:pt_BR';p.templates=[automaticTemplate(t)];const b=p.templates[0].bindings[1];b.source='column_datetime';
- for(const [date,time] of [['31/02/2026','07:00'],['11/12/2026','25:00'],['','07:00'],['11/12/2026','']]){const bytes=await workbook([{name:'05-11',headers:['Nome','Fone','Data','Horario'],rows:[['Ana','11999991234',date,time]]}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.equal(plan.summary.messages,0);assert.equal(plan.issues.length,1);}
+ for(const [date,time,failure] of [['31/02/2026','07:00',''],['11/12/2026','25:00','TIME_INVALID'],['','07:00',''],['11/12/2026','','TIME_MISSING']]){const bytes=await workbook([{name:'05-11',headers:['Nome','Fone','Data','Horario'],rows:[['Ana','11999991234',date,time]]}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.equal(plan.summary.messages,0);assert.equal(plan.issues.length,failure?0:1);assert.deepEqual(plan.failures.map(f=>f.code),failure?[failure]:[]);}
  for(const extra of ['Data consulta','Hora']){const bytes=await workbook([{name:'Lista',headers:['Nome','Fone','Data','Horario',extra],rows:[['Ana','11999991234','11/12/26','07:00',extra==='Hora'?'08:00':'12/12/26']]}]);const plan=await buildImportPlan(bytes,p,[t],{now});assert.equal(plan.summary.messages,0);assert(plan.issues[0].message.includes('ambígua'));b.dateAliases=['Data'];b.timeAliases=['Horario'];const resolved=await buildImportPlan(bytes,p,[t],{now});assert.deepEqual(resolved.issues,[]);assert.equal(resolved.segments[0].recipients[0].variables[1],'11/12/2026 07:00');b.dateAliases=[];b.timeAliases=[];}
  const missing=await workbook([{name:'05-11',headers:['Nome','Fone','Horario'],rows:[['Ana','11999991234','07:00']]}]);assert((await buildImportPlan(missing,p,[t],{now})).issues[0].message.includes('Coluna de data'));
+});
+
+test('telefone e horário inválidos não bloqueiam válidos e preservam aba, linha e motivo',async()=>{
+ const p=profile();p.templates[0].bindings[1]={...p.templates[0].bindings[1],source:'sheet_datetime',aliases:['Horario'],transform:'datetime'};
+ const bytes=await workbook([{name:'05-11',headerRow:23,headers:[...headers,'Horario'],rows:[[...ana,'09:00'],['Bia','123',...ana.slice(2),'09:00'],['Caio','11988881234',...ana.slice(2),''],['Dani','11977771234',...ana.slice(2),'25:00']]}]);
+ const plan=await buildImportPlan(bytes,p,templates,{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.summary.rows,4);assert.equal(plan.summary.messages,1);assert.equal(plan.summary.failed,3);assert.deepEqual(plan.failures.map(f=>[f.sheet,f.row,f.code]),[['05-11',25,'PHONE_INVALID'],['05-11',26,'TIME_MISSING'],['05-11',27,'TIME_INVALID']]);assert(plan.failures.every(f=>f.message.length>0));
+});
+test('todas as linhas inválidas continuam sem revisão e mais de mil falhas são preservadas',async()=>{
+ const bytes=await workbook([{name:'Lista',headers,rows:Array.from({length:1005},(_,i)=>['Pessoa '+i,'123',...ana.slice(2)])}]);const plan=await buildImportPlan(bytes,profile(),templates,{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.summary.messages,0);assert.equal(plan.summary.failed,1005);assert.equal(plan.failures.at(-1)?.row,1013);
+});
+
+test('coluna de horário ausente gera falha por linha e coluna ambígua continua para revisão',async()=>{
+ const p=profile();p.templates[0].bindings[1]={...p.templates[0].bindings[1],source:'sheet_datetime',aliases:['Horario'],transform:'datetime'};
+ const bytes=await workbook([{name:'05-11',headers,rows:[ana]}]);const plan=await buildImportPlan(bytes,p,templates,{now});assert.deepEqual(plan.issues,[]);assert.equal(plan.failures[0].code,'TIME_MISSING');assert.equal(plan.failures[0].row,9);
 });

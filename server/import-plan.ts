@@ -1,14 +1,15 @@
+import {ImportRowFailure,requiredClock} from './import-row-failure.js';
 import {columnSemantic,templateSemantic,semanticLabels,words} from '../shared/import-semantics.js';
 import {createHash} from 'node:crypto';
 import {parseWorkbook,normalize,type SheetPreview} from './importer.js';
-import type {ImportProfile,ImportIssue,ImportBinding} from '../shared/import-profile.js';
+import type {ImportProfile,ImportIssue,ImportBinding,ImportFailure} from '../shared/import-profile.js';
 import type {Template} from './meta.js';
 export const templateSignature=(t:Template)=>createHash('sha256').update(JSON.stringify([t.name,t.language,t.body,t.parameters])).digest('hex');
 export type PlannedRecipient={phone:string;variables:string[];sourceRows:{sheet:string;row:number}[]};
 export type PlannedSegment={sheet:string;template:string;scheduledAt:string;immediate:boolean;recipients:PlannedRecipient[]};
-export type ImportPlan={issues:ImportIssue[];sheets:{name:string;headerRow:number;phoneColumn:string;columns:string[];invalid:number}[];segments:PlannedSegment[];summary:{rows:number;messages:number;duplicates:number;groups:number;sheets:number;segments:{sheet:string;template:string;scheduledAt:string;messages:number}[]}};
+export type ImportPlan={issues:ImportIssue[];failures:ImportFailure[];sheets:{name:string;headerRow:number;phoneColumn:string;columns:string[];invalid:number}[];segments:PlannedSegment[];summary:{rows:number;messages:number;failed:number;duplicates:number;groups:number;sheets:number;segments:{sheet:string;template:string;scheduledAt:string;messages:number}[]}};
 export type ImportOverride=Record<string,{headerRow?:number;phoneColumn?:string}>;
-const column=(columns:string[],aliases:string[])=>{const matches=columns.filter(c=>aliases.some(a=>normalize(a)===normalize(c)));if(matches.length!==1)throw new Error(matches.length?'Mais de uma coluna corresponde a '+aliases.join(', ')+'.':'Coluna não encontrada: '+(aliases.join(', ')||'sem nomes configurados')+'.');return matches[0];};
+const column=(columns:string[],aliases:string[],missingTime=false)=>{const matches=columns.filter(c=>aliases.some(a=>normalize(a)===normalize(c)));if(!matches.length&&missingTime)throw new ImportRowFailure('TIME_MISSING','Coluna de horário não encontrada.');if(matches.length!==1)throw new Error(matches.length?'Mais de uma coluna corresponde a '+aliases.join(', ')+'.':'Coluna não encontrada: '+(aliases.join(', ')||'sem nomes configurados')+'.');return matches[0];};
 export function calendarDate(value:string,year?:number|null):string|null{
  const s=value.trim();let y:number,m:number,d:number;let match=s.match(/^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/);
  if(match){y=+match[1];m=+match[2];d=+match[3];}else{match=s.match(/^(\d{1,2})[./_-](\d{1,2})(?:[./_-](\d{2}|\d{4}))?$/);if(!match)return null;d=+match[1];m=+match[2];if(!match[3]&&!year)return null;y=match[3]?+match[3]:year!;if(y<100)y+=2000;}
@@ -30,11 +31,12 @@ function clockValue(value:string):string|null{
 function columnDateTime(sheet:SheetPreview,row:Record<string,string>,b:ImportBinding){
  const choose=(kind:'date'|'time',aliases:string[]=[])=>{
   const candidates=sheet.columns.filter(c=>aliases.length?aliases.some(a=>words(a)===words(c)):columnSemantic(c)===kind);
+  if(!candidates.length&&kind==='time')throw new ImportRowFailure('TIME_MISSING',`Coluna de horário ausente para {{${b.parameter}}}.`);
   if(candidates.length!==1)throw new Error(`Coluna de ${kind==='date'?'data':'horário'} ausente ou ambígua para {{${b.parameter}}}.`);
   return row[candidates[0]]||'';
  };
  const date=calendarDate(choose('date',b.dateAliases));if(!date)throw new Error(`Data da linha inválida para {{${b.parameter}}}.`);
- const time=clockValue(choose('time',b.timeAliases));if(!time)throw new Error(`Horário da linha inválido para {{${b.parameter}}}.`);
+ const time=requiredClock(choose('time',b.timeAliases),b.parameter,clockValue);
  return date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4)+' '+time;
 }
 function sheetDateTime(sheet:SheetPreview,row:Record<string,string>,b:ImportBinding,profile:ImportProfile,now:Date){
@@ -42,16 +44,16 @@ function sheetDateTime(sheet:SheetPreview,row:Record<string,string>,b:ImportBind
  const date=sheetDate(sheet.name,year);if(!date)throw new Error(`Data da aba ausente, inválida ou ambígua para {{${b.parameter}}}. Use uma aba como 05-11 ou 05-11-2026.`);
  const aliases=b.aliases.filter(a=>words(a)!=='nome da aba');
  const candidates=sheet.columns.filter(c=>aliases.length?aliases.some(a=>words(a)===words(c)):columnSemantic(c)==='time');
+ if(!candidates.length)throw new ImportRowFailure('TIME_MISSING',`Coluna de horário ausente para {{${b.parameter}}}.`);
  if(candidates.length!==1)throw new Error(`Horário da linha ausente ou ambíguo para {{${b.parameter}}}.`);
- const time=clockValue(row[candidates[0]]||'');if(!time)throw new Error(`Horário inválido para {{${b.parameter}}}.`);
+ const time=requiredClock(row[candidates[0]]||'',b.parameter,clockValue);
  return date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4)+' '+time;
 }
 function transform(value:string,b:ImportBinding){
- const v=value.trim();if(!v)throw new Error(`Valor vazio para ${b.label||'variável '+b.parameter}.`);
+ const v=value.trim();if(b.transform==='time')return requiredClock(v,b.parameter,clockValue);if(!v)throw new Error(`Valor vazio para ${b.label||'variável '+b.parameter}.`);
  if(b.transform==='first_name')return v.split(/\s+/)[0];
  if(b.transform==='date'){const date=calendarDate(v);if(!date)throw new Error(`Data inválida para ${b.label||b.parameter}.`);return date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4);}
- if(b.transform==='datetime'){const date=calendarDate(v),time=clockValue(v);if(!date||!time)throw new Error(`Data e horário inválidos para ${b.label||b.parameter}.`);return date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4)+' '+time;}
- if(b.transform==='time'){const time=clockValue(v);if(!time)throw new Error(`Horário inválido para ${b.label||b.parameter}.`);return time;}
+ if(b.transform==='datetime'){const date=calendarDate(v);if(!date)throw new Error(`Data inválida para ${b.label||b.parameter}.`);const time=requiredClock(v,b.parameter,clockValue);return date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4)+' '+time;}
  if(/^1899-|^1900-/.test(v))throw new Error(`Horário do Excel precisa de uma data de atendimento para ${b.label||b.parameter}.`);
  return v;
 }
@@ -72,6 +74,7 @@ function automaticColumn(sheet:SheetPreview,body:string,b:ImportBinding):{name:s
   candidates=sheet.columns.filter(c=>{if(columnSemantic(c)!=='provider')return false;const values=sheet.rows.slice(0,100).map(r=>r.fields[c]?.trim()).filter(Boolean);return values.length>0&&values.filter(locationValue).length/values.length>=0.9;});
   locationFromContent=candidates.length>0;
  }
+ if(!candidates.length&&semantic==='time')throw new ImportRowFailure('TIME_MISSING',`Coluna de horário ausente para {{${b.parameter}}}.`);
  if(!candidates.length)throw new Error(`Coluna de ${semanticLabels[semantic].toLowerCase()} não identificada para {{${b.parameter}}}.`);
  // Validate the column across multiple rows, never choose a different column for each recipient.
  const quality=(c:string)=>{const values=sheet.rows.slice(0,100).map(r=>r.fields[c]?.trim()).filter(Boolean);return values.length?values.filter(v=>semantic==='date'?!!calendarDate(v):semantic==='time'?/(?:^|T|\s)([01]?\d|2[0-3]):[0-5]\d/.test(v):/[a-zA-ZÀ-ÿ]/.test(v)).length/values.length:0;};
@@ -84,13 +87,13 @@ export async function buildImportPlan(buffer:Buffer,profile:ImportProfile,templa
  const now=options.now||new Date();const ignored=new Set((options.ignoredRows||[]).map(r=>JSON.stringify([r.sheet,r.row])));
  const hints=[profile.nameAliases,...profile.templates.flatMap(t=>t.bindings.filter(b=>b.source==='column').map(b=>b.aliases)),profile.routingAliases,profile.schedule.aliases].filter(a=>a.length);
  const sheets=await parseWorkbook(buffer,{...profile.layouts,...options.overrides},{phoneAliases:profile.phoneAliases,nameAliases:profile.nameAliases,headerHints:hints,keepDuplicates:true,headerRow:profile.headerRow});
- const issues:ImportIssue[]=[];const records:{sheet:string;row:number;phone:string;identity:string;original:string[];key:string;scheduledAt:string;immediate:boolean;variables:string[];bindings:ImportBinding[];groupValues:string[]}[]=[];
+ const issues:ImportIssue[]=[],failures:ImportFailure[]=[];const records:{sheet:string;row:number;phone:string;identity:string;original:string[];key:string;scheduledAt:string;immediate:boolean;variables:string[];bindings:ImportBinding[];groupValues:string[]}[]=[];
  let rows=0,duplicates=0,groups=0;const schedules=new Map<string,string>();
  const add=(sheet:string,row:number,message:string)=>{if(issues.length<1000)issues.push({sheet,row,message});};
  for(const sheet of sheets){
   const resolvedColumns=new Map<string,ReturnType<typeof automaticColumn>>();
   if(!sheet.headerRow||!sheet.phoneColumn){add(sheet.name,0,sheet.warnings[0]||'Cabeçalho ou telefone não identificado.');continue;}
-  for(const rejected of sheet.rejectedRows||[])if(!ignored.has(JSON.stringify([sheet.name,rejected.row])))add(sheet.name,rejected.row,rejected.reason);
+  for(const rejected of sheet.rejectedRows||[])if(!ignored.has(JSON.stringify([sheet.name,rejected.row]))){rows++;failures.push({sheet:sheet.name,row:rejected.row,code:'PHONE_INVALID',message:rejected.reason});}
   for(const row of sheet.rows){if(ignored.has(JSON.stringify([sheet.name,row.row])))continue;rows++;
    try{
     let key=profile.fixedTemplate;
@@ -99,13 +102,13 @@ export async function buildImportPlan(buffer:Buffer,profile:ImportProfile,templa
     const allowed=profile.templates.find(t=>t.key===key);if(!allowed)throw new Error(profile.mode==='form'?'Selecione um template liberado pela equipe.':'Template sem configuração de variáveis no perfil.');
     const template=templates.find(t=>`${t.name}:${t.language}`===key&&t.supported);if(!template)throw new Error('Template não está aprovado ou compatível na Meta.');if(allowed.signature&&allowed.signature!==templateSignature(template))throw new Error('O template mudou na Meta. A equipe precisa conferir e salvar o perfil novamente.');
     let bindings=template.parameters.map(parameter=>{const b=allowed.bindings.find(b=>b.parameter===parameter);if(!b)throw new Error(`Configure a origem da variável {{${parameter}}} no perfil.`);return b;});
-    const variables=bindings.map((b,i)=>{const semantic=templateSemantic(template.body,b.parameter,b.label);const autoColumns=b.source==='auto'&&semantic==='date'&&(b.transform==='text'||b.transform==='datetime')&&sheet.columns.some(c=>columnSemantic(c)==='date')&&sheet.columns.some(c=>columnSemantic(c)==='time');if(b.source==='column_datetime'||autoColumns){bindings[i]={...b,transform:'datetime'};return columnDateTime(sheet,row.fields,autoColumns?{...b,dateAliases:[],timeAliases:[]}:b);}const legacy=b.source==='column'&&b.aliases.some(a=>words(a)==='nome da aba');const autoSheet=b.source==='auto'&&semantic==='date'&&!sheet.columns.some(c=>columnSemantic(c)==='date')&&sheet.columns.some(c=>columnSemantic(c)==='time');if(b.source==='sheet_datetime'||legacy||autoSheet||(b.source==='column'&&b.transform==='datetime'&&b.aliases.some(a=>sheet.columns.some(c=>words(c)===words(a)&&columnSemantic(c)==='time')))){bindings[i]={...b,transform:'datetime'};return sheetDateTime(sheet,row.fields,autoSheet?{...b,aliases:[]}:b,profile,now);}if(b.source==='auto'||(b.source==='column'&&!b.aliases.length)){const cacheKey=JSON.stringify([key,b.parameter]);let resolved=resolvedColumns.get(cacheKey);if(!resolved){resolved=automaticColumn(sheet,template.body,b);resolvedColumns.set(cacheKey,resolved);}const value=row.fields[resolved.name]||'';if(resolved.locationFromContent&&!locationValue(value))throw new Error(`O conteúdo de ${resolved.name} não identifica uma unidade ou endereço para {{${b.parameter}}}.`);if(resolved.combinedProcedure&&!procedureText(value))throw new Error(`O conteúdo de ${resolved.name} não identifica o procedimento para {{${b.parameter}}}.`);bindings[i]=resolved.binding;return transform(value,resolved.binding);}return transform(b.source==='fixed'?b.value:row.fields[column(sheet.columns,b.aliases)]||'',b);});
+    const variables=bindings.map((b,i)=>{const semantic=templateSemantic(template.body,b.parameter,b.label);const autoColumns=b.source==='auto'&&semantic==='date'&&(b.transform==='text'||b.transform==='datetime')&&sheet.columns.some(c=>columnSemantic(c)==='date')&&sheet.columns.some(c=>columnSemantic(c)==='time');if(b.source==='column_datetime'||autoColumns){bindings[i]={...b,transform:'datetime'};return columnDateTime(sheet,row.fields,autoColumns?{...b,dateAliases:[],timeAliases:[]}:b);}const legacy=b.source==='column'&&b.aliases.some(a=>words(a)==='nome da aba');const autoSheet=b.source==='auto'&&semantic==='date'&&!sheet.columns.some(c=>columnSemantic(c)==='date')&&sheet.columns.some(c=>columnSemantic(c)==='time');if(b.source==='sheet_datetime'||legacy||autoSheet||(b.source==='column'&&b.transform==='datetime'&&b.aliases.some(a=>sheet.columns.some(c=>words(c)===words(a)&&columnSemantic(c)==='time')))){bindings[i]={...b,transform:'datetime'};return sheetDateTime(sheet,row.fields,autoSheet?{...b,aliases:[]}:b,profile,now);}if(b.source==='auto'||(b.source==='column'&&!b.aliases.length)){const cacheKey=JSON.stringify([key,b.parameter]);let resolved=resolvedColumns.get(cacheKey);if(!resolved){resolved=automaticColumn(sheet,template.body,b);resolvedColumns.set(cacheKey,resolved);}const value=row.fields[resolved.name]||'';if(resolved.locationFromContent&&!locationValue(value))throw new Error(`O conteúdo de ${resolved.name} não identifica uma unidade ou endereço para {{${b.parameter}}}.`);if(resolved.combinedProcedure&&!procedureText(value))throw new Error(`O conteúdo de ${resolved.name} não identifica o procedimento para {{${b.parameter}}}.`);bindings[i]=resolved.binding;return transform(value,resolved.binding);}return transform(b.source==='fixed'?b.value:row.fields[column(sheet.columns,b.aliases,b.transform==='time'||semantic==='time')]||'',b);});
     if(variables.some(v=>v.length>1024))throw new Error('Uma variável ultrapassa 1.024 caracteres.');
     let immediate=profile.schedule.source==='immediate';let scheduledAt=now.toISOString();
     if(!immediate){const date=profile.schedule.source==='sheet'?sheetDate(sheet.name,profile.schedule.year):calendarDate(row.fields[column(sheet.columns,profile.schedule.aliases)]||'',profile.schedule.year);if(!date)throw new Error('Data de agendamento ausente, inválida ou ambígua. Configure o ano quando a aba não o informar.');const source=new Date(date+'T12:00:00Z');source.setUTCDate(source.getUTCDate()-profile.schedule.daysBefore);const day=source.toISOString().slice(0,10);scheduledAt=schedules.get(day)||saoPauloInstant(day,profile.schedule.time);schedules.set(day,scheduledAt);if(Date.parse(scheduledAt)<now.getTime()){if(profile.schedule.past==='now'){scheduledAt=now.toISOString();immediate=true;}else throw new Error('A data calculada para o disparo já passou. A equipe precisa revisar o agendamento.');}}
     const groupValues=profile.duplicates==='group'?profile.groupKeys.map(k=>{const value=row.fields[column(sheet.columns,k.aliases)]?.trim();if(!value)throw new Error('Identificador de compromisso vazio: '+k.label+'.');return value;}):[];
     records.push({sheet:sheet.name,row:row.row,phone:row.phone,identity:normalize(row.name),original:sheet.columns.map(c=>row.fields[c]||''),key,scheduledAt,immediate,variables,bindings,groupValues});
-   }catch(e){add(sheet.name,row.row,(e as Error).message);}
+   }catch(e){if(e instanceof ImportRowFailure)failures.push({sheet:sheet.name,row:row.row,code:e.code,message:e.message});else add(sheet.name,row.row,(e as Error).message);}
   }
  }
  const exact=new Set<string>();const merged=new Map<string,{record:typeof records[number];recipient:PlannedRecipient;values:string[][]}>();
@@ -120,6 +123,6 @@ export async function buildImportPlan(buffer:Buffer,profile:ImportProfile,templa
   const key=JSON.stringify([record.sheet,record.key,record.scheduledAt]);const bucket=buckets.get(key)||[];let segment=bucket.find(s=>s.recipients.length<50000&&!phones.get(s)!.has(recipient.phone));
   if(!segment){segment={sheet:record.sheet,template:record.key,scheduledAt:record.scheduledAt,immediate:record.immediate,recipients:[]};bucket.push(segment);phones.set(segment,new Set());buckets.set(key,bucket);}segment.recipients.push(recipient);phones.get(segment)!.add(recipient.phone);
  }
- const segments=[...buckets.values()].flat();if(segments.length>250)add('',0,'A importação gera mais de 250 lotes. Divida a planilha.');if(!segments.length&&!issues.length)add('',0,'Nenhum contato válido foi encontrado.');
- return {issues,sheets:sheets.map(s=>({name:s.name,headerRow:s.headerRow,phoneColumn:s.phoneColumn,columns:s.columns,invalid:s.invalid})),segments,summary:{rows,messages:segments.reduce((n,s)=>n+s.recipients.length,0),duplicates,groups,sheets:sheets.length,segments:segments.map(s=>({sheet:s.sheet,template:s.template,scheduledAt:s.scheduledAt,messages:s.recipients.length}))}};
+ const segments=[...buckets.values()].flat();if(segments.length>250)add('',0,'A importação gera mais de 250 lotes. Divida a planilha.');if(!segments.length&&!issues.length&&!failures.length)add('',0,'Nenhum contato válido foi encontrado.');
+ return {issues,failures,sheets:sheets.map(s=>({name:s.name,headerRow:s.headerRow,phoneColumn:s.phoneColumn,columns:s.columns,invalid:s.invalid})),segments,summary:{rows,failed:failures.length,messages:segments.reduce((n,s)=>n+s.recipients.length,0),duplicates,groups,sheets:sheets.length,segments:segments.map(s=>({sheet:s.sheet,template:s.template,scheduledAt:s.scheduledAt,messages:s.recipients.length}))}};
 }

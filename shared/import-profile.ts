@@ -22,5 +22,7 @@ export const importProfileSchema=z.object({
 export type ImportProfile=z.infer<typeof importProfileSchema>;
 export type ImportBinding=z.infer<typeof bindingSchema>;
 export const defaultImportProfile=():ImportProfile=>importProfileSchema.parse({});
+export type ImportFailureCode='PHONE_INVALID'|'TIME_MISSING'|'TIME_INVALID';
+export type ImportFailure={sheet:string;row:number;code:ImportFailureCode;message:string};
 export type ImportIssue={sheet:string;row:number;message:string};
-export type ImportSummary={id:string;file_name:string;status:'ready'|'review'|'submitted';requested_at:string|null;created_at:string;client_id:string;client_name?:string;issues:ImportIssue[];summary:{rows:number;messages:number;duplicates:number;groups:number;sheets:number;segments:{sheet:string;template:string;scheduledAt:string;messages:number}[]};campaign_ids:string[]};
+export type ImportSummary={id:string;file_name:string;status:'ready'|'review'|'submitted';requested_at:string|null;created_at:string;client_id:string;client_name?:string;issues:ImportIssue[];failures?:ImportFailure[];summary:{rows:number;messages:number;failed?:number;duplicates:number;groups:number;sheets:number;segments:{sheet:string;template:string;scheduledAt:string;messages:number}[]};campaign_ids:string[]};

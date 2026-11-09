@@ -1,3 +1,4 @@
+import {saveImportFailures} from './import-failures.js';
 import {recordError} from './error-log.js';
 import {automaticTemplate,words} from '../shared/import-semantics.js';
 import {Router,type Response} from 'express';
@@ -25,7 +26,7 @@ async function loadProfile(client:any,available:Template[]){
  profile.templates=(profile.mode==='fixed'?(fixed?[fixed]:[]):usable).map(automaticTemplate);
  return {config:profile,version:0};
 }
-function publicBatch(row:any){const plan=row.result as ImportPlan;return {id:row.id,client_id:row.client_id,client_name:row.client_name,file_name:row.file_name,status:row.status,requested_at:row.requested_at,created_at:row.created_at,issues:plan.issues,summary:plan.summary,campaign_ids:row.campaign_ids};}
+function publicBatch(row:any){const plan=row.result as ImportPlan;return {id:row.id,client_id:row.client_id,client_name:row.client_name,file_name:row.file_name,status:row.status,requested_at:row.requested_at,created_at:row.created_at,issues:plan.issues,failures:(plan.failures||[]).slice(0,50),summary:plan.summary,campaign_ids:row.campaign_ids};}
 async function clientFor(id:string){const [client]=await query('select * from app.clients where id=$1',[id]);return client;}
 router.get('/clients/:id/import-profile',admin,async(req,res)=>{const id=z.uuid().parse(req.params.id);const client=await clientFor(id);if(!client)return res.sendStatus(404);const available=await templates(client);res.json({...await loadProfile(client,available),templates:available});});
 router.put('/clients/:id/import-profile',admin,async(req,res)=>{
@@ -67,7 +68,6 @@ router.post('/import-batches/:id/submit',capacity,async(req,res)=>{
  const id=z.uuid().parse(req.params.id);z.object({}).parse(req.body||{});
  const [batch]=await query('select * from app.import_batches where id=$1 and expires_at>now()',[id]);if(!batch)return res.sendStatus(404);if(!allowed(res,batch.client_id))return res.sendStatus(403);if(batch.status==='submitted')return res.json(publicBatch(batch));
  const client=await clientFor(batch.client_id);if(!client?.active)return res.status(400).json({error:'Cliente indisponível.'});
- if(batch.status==='review'){const [requested]=await query("update app.import_batches set requested_at=coalesce(requested_at,now()) where id=$1 and status='review' returning *",[id]);if(!requested)return res.status(409).json({error:'A importação mudou. Atualize os dados.'});return res.json(publicBatch(requested));}
  const available=await templates(client),profile=await loadProfile(client,available);
  // Recalculate from the stored workbook; browser-supplied recipients and mappings are never used.
  const plan=await buildImportPlan(Buffer.from(batch.file_base64,'base64'),profile.config,available,{chosenTemplate:batch.chosen_template,overrides:batch.overrides,ignoredRows:batch.ignored_rows});
@@ -82,6 +82,13 @@ router.post('/import-batches/:id/submit',capacity,async(req,res)=>{
    const scheduledAt=segment.immediate?new Date().toISOString():segment.scheduledAt;if(!reportName)reportName=await nextPortalCampaignName(db,locked,scheduledAt);const name=reportName;const split=segment.template.lastIndexOf(':');const template=segment.template.slice(0,split),language=segment.template.slice(split+1);
    const [campaign]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,scheduled_at,consent_confirmed,request_key,status,source,import_batch_id,import_segment,import_template_signature,report_group_id,report_name) values($1,$2,$3,$4,$5,false,gen_random_uuid(),'running',$6,$7,$8,$9,$7,$10) returning id`,[batch.client_id,name,template,language,scheduledAt,res.locals.clientId?'portal':'admin',id,String(index),templateSignature(available.find(t=>`${t.name}:${t.language}`===segment.template)!),reportName])).rows;
    await db.query(`insert into app.messages(campaign_id,client_id,phone,variables,source_rows) select $1,$2,r.phone,r.variables,r."sourceRows" from jsonb_to_recordset($3::jsonb) as r(phone text,variables jsonb,"sourceRows" jsonb)`,[campaign.id,batch.client_id,JSON.stringify(segment.recipients)]);ids.push(campaign.id);
+  }
+  if(!plan.issues.length&&plan.failures.length){
+   if(!ids.length){
+    reportName=await nextPortalCampaignName(db,locked,new Date().toISOString());
+    const [campaign]=(await db.query(`insert into app.campaigns(client_id,name,template_name,language,status,completed_at,consent_confirmed,request_key,source,import_batch_id,import_segment,report_group_id,report_name) values($1,$2,'Falhas de importação','pt_BR','completed',now(),false,gen_random_uuid(),$3,$4,'failures',$4,$2) returning id`,[batch.client_id,reportName,res.locals.clientId?'portal':'admin',id])).rows;ids.push(campaign.id);
+   }
+   await saveImportFailures(db,ids[0],batch.client_id,id,plan.failures);
   }
   const [saved]=(await db.query("update app.import_batches set requested_at=coalesce(requested_at,now()),profile_version=$2,result=$3,status=$4,campaign_ids=$5 where id=$1 returning *",[id,profile.version,JSON.stringify(plan),plan.issues.length?'review':'submitted',JSON.stringify(ids)])).rows;
   await db.query("insert into app.audit(actor,action,target_id) values($1,'import.submit',$2)",[res.locals.actor,id]);return saved;

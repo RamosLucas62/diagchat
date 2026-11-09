@@ -37,3 +37,13 @@ test('avisos de lotes antigos sem tentativa são substituídos por um consolidad
  await query("update app.messages set state='accepted' where campaign_id=$1",[group.ids[1]]);await maintenance();const pending=await query("select * from app.outbox where status='pending'");assert.equal(pending.length,1);assert.equal(pending[0].reference_id,group.id);
  const previous=await reportGroup(cid,['accepted','accepted']);await query("insert into app.outbox(kind,reference_id,payload,status,first_attempt_at) values('group',$1,'{}','sent',now())",[previous.ids[0]]);await maintenance();assert.equal((await query("select * from app.outbox where kind='group' and reference_id=$1",[previous.id])).length,0);
 });
+
+test('falhas da planilha permanecem após expirar arquivo e entram no relatório sem consumir franquia',async()=>{
+ const {saveImportFailures,campaignImportFailures}=await import('../server/import-failures.js');const {transaction}=await import('../server/db.js');const {listCampaigns}=await import('../server/campaigns.js');
+ const cid=await seed(),group=await reportGroup(cid,['accepted']);const failures=Array.from({length:105},(_,i)=>({sheet:'Agenda',row:i+2,code:'PHONE_INVALID' as const,message:'Telefone ausente ou inválido.'}));
+ await transaction(async db=>{await saveImportFailures(db,group.ids[0],cid,group.id,failures);await saveImportFailures(db,group.ids[0],cid,group.id,failures);});
+ await query("update app.import_batches set expires_at=now()-interval '1 second' where id=$1",[group.id]);await maintenance();await maintenance();assert.equal((await query('select * from app.import_batches')).length,0);
+ const [campaign]=await listCampaigns(cid);assert.equal(campaign.total,106);assert.equal(campaign.failed,105);assert.equal(campaign.import_failed,105);const page=await campaignImportFailures(group.id,cid,0);assert.equal(page?.total,105);assert.equal(page?.items.length,100);assert.equal((await campaignImportFailures(group.id,cid,100))?.items.length,5);assert.equal(await campaignImportFailures(group.id,crypto.randomUUID(),0),null);assert.equal(page?.items[0].row_number,2);
+ const [usage]=await query('select accepted,reserved from app.usage where client_id=$1',[cid]);assert.equal(usage.accepted,0);assert.equal(usage.reserved,0);assert.equal((await query('select * from app.messages')).length,1);
+ const notices=await query("select * from app.outbox where kind='group'");assert.equal(notices.length,1);assert.match(notices[0].payload.text,/Total de contatos: 106/);assert.match(notices[0].payload.text,/Falhas confirmadas: 105/);
+});

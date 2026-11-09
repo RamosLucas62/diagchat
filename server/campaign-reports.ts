@@ -26,9 +26,9 @@ export async function queueCampaignReports(db:DB){
   const [row]=(await db.query(`select c.name,c.group_id,c.overage_mode,coalesce(u.accepted,0) as accepted,
    coalesce(u.reserved,0) as reserved,coalesce(u.monthly_limit,c.monthly_limit) as monthly_limit,
    coalesce(u.period,app.current_period())::text as period,
-   (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2) as total,
+   (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2)+(select count(*)::int from app.import_failures where report_group_id=$2 and client_id=$1) as total,
    (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2 and m.state='accepted') as sent,
-   (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2 and m.state='failed') as failed,
+   (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2 and m.state='failed')+(select count(*)::int from app.import_failures where report_group_id=$2 and client_id=$1) as failed,
    (select count(*)::int from app.messages m join app.campaigns p on p.id=m.campaign_id where coalesce(p.report_group_id,p.id)=$2 and m.state='cancelled') as cancelled
    from app.clients c left join app.usage u on u.client_id=c.id and u.period=app.current_period() where c.id=$1`,[group.client_id,group.id])).rows;
   if(row?.group_id)await db.query(`insert into app.outbox(kind,reference_id,payload) values('group',$1,$2) on conflict do nothing`,[group.id,JSON.stringify({number:row.group_id,text:groupReport({clientName:row.name,campaignName:group.name,completedAt:group.completed_at,period:row.period,total:row.total,sent:row.sent,failed:row.failed,cancelled:row.cancelled,accepted:row.accepted,reserved:row.reserved,monthlyLimit:row.monthly_limit,overageMode:row.overage_mode})})]);
