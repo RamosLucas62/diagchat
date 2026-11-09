@@ -22,7 +22,7 @@ export async function sendMeta(job:any) {
    biz_opaque_callback_data:message.id,template:{name:campaign.template_name,language:{code:campaign.language},
    ...(message.variables.length?{components:[{type:'body',parameters:message.variables.map((text:string)=>({type:'text',text}))}]}:{})}}),signal:AbortSignal.timeout(20000)});
  const body:any=await response.json();
- if(response.ok&&body.messages?.[0]?.id)return {state:'accepted',id:body.messages[0].id,error:null};
+ if(response.ok&&body.messages?.[0]?.id)return {state:'accepted',id:body.messages[0].id,error:null,temporary:false};
  // HTTP 5xx/invalid responses may arrive after acceptance: never automatically resend.
- return {state:response.status>=500||response.ok?'unknown':'failed',id:null,error:safeErrorText(`Meta ${body.error?.code||response.status}: ${body.error?.message||'Resposta sem confirmação do envio'}${body.error?.error_data?.details?' · '+body.error.error_data.details:''}`)};
+ return {state:response.status>=500||response.ok?'unknown':'failed',id:null,temporary:response.status===429||response.status===408||response.status>=500||response.ok,error:safeErrorText(`Meta ${body.error?.code||response.status}: ${body.error?.message||'Resposta sem confirmação do envio'}${body.error?.error_data?.details?' · '+body.error.error_data.details:''}`)};
 }

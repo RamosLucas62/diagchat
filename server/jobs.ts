@@ -6,11 +6,21 @@ import { query,transaction } from './db.js';
 import { sendMeta } from './meta.js';
 import {queueInvoiceEmail} from './billing.js';
 import {ensureInvoiceReport,reportAttachment} from './reports.js';
-export async function dispatchOne() {
- const [{job}]=await query('select app.claim_message() as job');if(!job)return false;
- let result;try{result=await sendMeta(job);}catch(e){result={state:'unknown',id:null,error:'Resposta incerta. Aguardando webhook; não reenviar automaticamente. '+safeErrorText(e)};}
- await query('select app.finish_message($1,$2,$3,$4)',[job.message.id,result.state,result.id,result.error]);if(result.state!=='accepted')await recordError({source:'meta',operation:'Enviar mensagem pela Cloud API',code:result.state,error:result.error,clientId:job.client.id,campaignId:job.campaign.id});return true;
+type QueueQuery=typeof query;
+export async function claimMessage(database:QueueQuery=query){const [{job}]=await database('select app.claim_message() as job');return job;}
+// Read-only scheduling hint: a null claim can mean a client's throughput slot is not due yet.
+export async function nextMessageDelay(database:QueueQuery=query):Promise<number|null>{
+ const [row]=await database(`select extract(epoch from (min(greatest(c.next_dispatch_at,p.scheduled_at))-clock_timestamp()))*1000 as delay_ms
+  from app.clients c join app.campaigns p on p.client_id=c.id
+  where c.active and p.status in ('running','blocked')
+  and exists(select 1 from app.messages m where m.campaign_id=p.id and m.state='queued')`);
+ return row.delay_ms===null?null:Number(row.delay_ms);
 }
+export async function dispatchClaimed(job:any,database:QueueQuery=query) {
+ let result;try{result=await sendMeta(job);}catch(e){result={state:'unknown',id:null,temporary:true,error:'Resposta incerta. Aguardando webhook; não reenviar automaticamente. '+safeErrorText(e)};}
+ await database('select app.finish_message($1,$2,$3,$4)',[job.message.id,result.state,result.id,result.error]);if(result.state!=='accepted')await recordError({source:'meta',operation:'Enviar mensagem pela Cloud API',code:result.state,error:result.error,clientId:job.client.id,campaignId:job.campaign.id});return {temporary:result.temporary};
+}
+export async function dispatchOne(){const job=await claimMessage();if(!job)return false;await dispatchClaimed(job);return true;}
 export async function maintenance() {
  await query('delete from app.import_batches where expires_at<now()');
  const interrupted=await query(`update app.messages set state='unknown',error='Processo interrompido; aguardando confirmação da Meta.' where state='sending' and claimed_at<now()-interval '2 minutes' returning client_id,campaign_id`);for(const item of interrupted)await recordError({source:'worker',operation:'Recuperação de mensagem interrompida',code:'MESSAGE_UNKNOWN',error:'Processo interrompido; aguardando confirmação da Meta, sem reenvio automático.',clientId:item.client_id,campaignId:item.campaign_id});

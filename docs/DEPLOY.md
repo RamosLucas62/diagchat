@@ -48,7 +48,7 @@ Preencha no ambiente do EasyPanel as variáveis listadas em `.env.example`:
 | Instruções de pagamento | Configure por cliente em **Financeiro → E-mails de cobrança**. |
 | `EVOLUTION_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE` | Instância Evolution v2 destinada aos avisos nos grupos. |
 | `DEMO_MODE=false` | Em produção o modo de demonstração é recusado. |
-| `WORKER_CONCURRENCY=16` | Máximo de envios simultâneos por processo worker. |
+| `WORKER_CONCURRENCY=16` | Máximo de entregas simultâneas por processo (1–100). Reservas são seriais; fila vazia aguarda 5 s. |
 
 Gere a chave de criptografia em um terminal seguro com `openssl rand -hex 32`. Guarde uma cópia segura. Alterá-la depois de cadastrar clientes torna os segredos anteriores ilegíveis; uma rotação exige recriptografar os registros.
 
@@ -150,3 +150,5 @@ Em **Editar cliente → Dados do cliente → Solicitações pelo portal**, ative
 A migração 006 adiciona os perfis, arquivos temporários privados e referências de origem. Ela é aplicada automaticamente ao iniciar web/worker. Atualize ambos para a mesma versão; não há novas variáveis de ambiente.
 
 Antes de liberar o envio de planilhas, configure **Clientes → Editar → Planilhas e disparos** com os templates e o significado das variáveis do cliente. O perfil inicial não inventa essas associações. A revisão fica em **Disparos → Importações e pendências**. Todos os novos lotes aguardam aprovação antes de entrar na fila do worker. Consulte [IMPORTACAO.md](IMPORTACAO.md) para formatos, agendamentos e revisão.
+
+O polling adaptativo e suas métricas estão documentados em [WORKER.md](WORKER.md). Esta atualização exige reconstruir/reiniciar o serviço worker; não exige migração SQL. Confira as instâncias nos logs para evitar réplicas antigas duplicadas.

@@ -135,3 +135,7 @@ As rotas financeiras não são acessíveis pelos links do portal do cliente. Tes
 Telefones inválidos e horários ausentes ou inválidos não colocam a solicitação em revisão: os contatos válidos entram na fila e as outras linhas são contadas como falhas. Em **Disparos → campanha → Falhas da planilha**, equipe e cliente podem consultar aba, linha original, motivo e horário do registro, com rolagem e paginação. Esses registros permanecem após a expiração do XLSX e não consomem franquia. Também entram nas métricas, no relatório consolidado do grupo e no resumo mensal. Problemas de configuração ou associações ambíguas continuam em revisão. Solicitações antigas podem ser revalidadas pelo botão **Revalidar e iniciar**.
 
 Esta atualização exige a migração `011_import_failures.sql` antes de executar a nova versão do web e do worker; o início do serviço aplica as migrações pendentes.
+
+## Polling do worker
+
+O worker busca mensagens de forma serial por processo, mantém até `WORKER_CONCURRENCY=16` entregas em voo e espera aproximadamente 5 segundos com a fila vazia. Slots futuros de throughput/agendamento usam espera adaptada; erros temporários aplicam backoff até 30 segundos, sem retry de mensagens incertas. Métricas cumulativas de consultas da fila, reservas, ociosidade, erros e concorrência são emitidas nos logs a cada minuto. Não há alterações em funções SQL ou regras financeiras. Auditoria, pontos de chamada, comparação e instruções de validação: [docs/WORKER.md](docs/WORKER.md).
